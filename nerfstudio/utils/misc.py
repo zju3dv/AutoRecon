@@ -19,6 +19,7 @@ Miscellaneous helper code.
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
+from nerfstudio.utils.pointclouds import BasicPointClouds
 
 
 def get_dict_to_torch(stuff: Any, device: Union[torch.device, str] = "cpu", exclude: Optional[List[str]] = None):
@@ -36,7 +37,7 @@ def get_dict_to_torch(stuff: Any, device: Union[torch.device, str] = "cpu", excl
             else:
                 stuff[k] = get_dict_to_torch(v, device)
         return stuff
-    if isinstance(stuff, torch.Tensor):
+    if isinstance(stuff, (torch.Tensor, BasicPointClouds)):  # TODO: add BasicImages?
         return stuff.to(device)
     return stuff
 

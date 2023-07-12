@@ -181,3 +181,34 @@ class NeuSScheduler(lr_scheduler.LambdaLR):
             return learning_factor
 
         super().__init__(optimizer, lr_lambda=func)
+
+
+@dataclass
+class AutoReconSchedulerConfig(InstantiateConfig):
+    """Scheduler tuned for AutoRecon w/ progressive hash encoding training"""
+
+    _target: Type = field(default_factory=lambda: AutoReconScheduler)
+    warm_up_end: int = 250
+    # learning_rate_alpha: float = 0.05
+    # max_steps: int = 300000
+
+    def setup(self, optimizer=None, lr_init=None, **kwargs) -> Any:
+        """Returns the instantiated object using the config."""
+        return self._target(
+            optimizer,
+            self.warm_up_end,
+        )
+
+
+class AutoReconScheduler(lr_scheduler.LambdaLR):
+    """warm up then decay"""
+
+    def __init__(self, optimizer, warm_up_end) -> None:
+        def func(step):
+            if step < warm_up_end:
+                learning_factor = step / warm_up_end
+            else:
+                learning_factor = 1.0
+            return learning_factor
+
+        super().__init__(optimizer, lr_lambda=func)

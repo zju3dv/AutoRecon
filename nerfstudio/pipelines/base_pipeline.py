@@ -35,6 +35,7 @@ from rich.progress import (
 from torch import nn
 from torch.nn import Parameter
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torchinfo import summary
 from typing_extensions import Literal
 
 from nerfstudio.configs import base_config as cfg
@@ -235,6 +236,9 @@ class VanillaPipeline(Pipeline):
             world_size=world_size,
             local_rank=local_rank,
         )
+        # print(self._model)
+        # model_stats = summary(self._model, col_names=["kernel_size", "num_params"])
+        # TODO: write model_stats to file (pass in the exp dir from trainer)
         self.model.to(device)
 
         self.world_size = world_size
@@ -270,7 +274,7 @@ class VanillaPipeline(Pipeline):
                 self.datamanager.get_param_groups()[camera_opt_param_group][0].data[:, 3:].norm()
             )
 
-        loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
+        loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict, step=step)  # FIXME: donnot use step here
 
         return model_outputs, loss_dict, metrics_dict
 
@@ -307,7 +311,7 @@ class VanillaPipeline(Pipeline):
         """
         self.eval()
         image_idx, camera_ray_bundle, batch = self.datamanager.next_eval_image(step)
-        outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
+        outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)  # (h, w, c)
         metrics_dict, images_dict = self.model.get_image_metrics_and_images(outputs, batch)
         assert "image_idx" not in metrics_dict
         metrics_dict["image_idx"] = image_idx
@@ -364,7 +368,7 @@ class VanillaPipeline(Pipeline):
         self.train()
         return metrics_dict
 
-    def load_pipeline(self, loaded_state: Dict[str, Any]) -> None:
+    def load_pipeline(self, loaded_state: Dict[str, Any], strict=True) -> None:
         """Load the checkpoint from the given path
 
         Args:
@@ -377,7 +381,13 @@ class VanillaPipeline(Pipeline):
             state.pop("datamanager.train_ray_generator.pose_optimizer.pose_adjustment", None)
             state.pop("datamanager.eval_ray_generator.image_coords", None)
             state.pop("datamanager.eval_ray_generator.pose_optimizer.pose_adjustment", None)
-        self.load_state_dict(state)  # type: ignore
+        elif not strict:
+            # TODO: is it ok? why do we save image_coords anyway?
+            state.pop("datamanager.train_ray_generator.image_coords", None)
+            state.pop("datamanager.eval_ray_generator.image_coords", None)
+        
+        # TODO: print unloaded state_dict keys
+        self.load_state_dict(state, strict=strict)  # type: ignore
 
     def get_training_callbacks(
         self, training_callback_attributes: TrainingCallbackAttributes

@@ -24,16 +24,16 @@
   "typescript.suggestionActions.enabled": false,
   "javascript.suggestionActions.enabled": false,
   "[python]": {
-    "editor.defaultFormatter": "ms-python.python",
+    "editor.defaultFormatter": "ms-python.black-formatter",
     "editor.codeActionsOnSave": {
       "source.organizeImports": true
     }
   },
-  "editor.formatOnSave": true,
+  "editor.formatOnSave": false,
   "python.envFile": "${workspaceFolder}/.env",
-  "python.formatting.provider": "black",
+  "python.formatting.provider": "yapf",
   "python.formatting.blackArgs": ["--line-length=120"],
-  "python.linting.pylintEnabled": true,
+  "python.linting.pylintEnabled": false,
   "python.linting.flake8Enabled": false,
   "python.linting.enabled": true,
   "python.sortImports.args": ["--src=${workspaceFolder}", "--profile", "black"],
@@ -130,5 +130,9 @@
     "reportOptionalCall": "none"
   },
   "python.languageServer": "Pylance",
-  "python.defaultInterpreterPath": "/home/yuzh/anaconda3/envs/monosdf/bin/python"
+  "python.defaultInterpreterPath": "/home/yuzh/anaconda3/envs/monosdf/bin/python",
+  "[yaml]": {
+    "editor.defaultFormatter": "redhat.vscode-yaml"
+  },
+  "python.linting.pylamaEnabled": false
 }

@@ -1,0 +1,3 @@
+[submodule "third_party/AutoDecomp"]
+	path = third_party/AutoDecomp
+	url = https://github.com/zju3dv/AutoDecomp.git

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import List, Type, Tuple, Dict
+from typing_extensions import Literal
 import numpy as np
 
 import torch
@@ -32,6 +33,7 @@ from nerfstudio.engine.callbacks import (
     TrainingCallbackLocation,
 )
 from nerfstudio.field_components.field_heads import FieldHeadNames
+from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.models.neus import NeuSModel, NeuSModelConfig
 from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.model_components.losses import interlevel_loss
@@ -50,7 +52,7 @@ class NeuSFactoModelConfig(NeuSModelConfig):
     """Number of samples per ray for the nerf network."""
     proposal_update_every: int = 5
     """Sample every n steps after the warmup"""
-    proposal_warmup: int = 5000
+    proposal_warmup: int = 5000  # FIXME: not used
     """Scales n from 1 to proposal_update_every over this many steps"""
     num_proposal_iterations: int = 2
     """Number of proposal network iterations."""
@@ -73,6 +75,19 @@ class NeuSFactoModelConfig(NeuSModelConfig):
     """Max num iterations for the annealing function."""
     use_single_jitter: bool = True
     """Whether use single jitter or not for the proposal networks."""
+    proposal_net_spatial_normalization_region: Literal["full", "fg"] = "full"
+    """if "full", normalize [-2, 2] into [0, 1], otherwise, normalize [-1, 1] into [0, 1]."""
+    proposal_use_uniform_sampler: bool = True
+    """whether to use UniformSampler as the initial sampler for the proposal network.
+    It's better to use UniformSampler if the region for the proposal network to model
+    is bounded and small (e.g., inside a object bbox). UniformLinDispPiecewiseSampler is more
+    appropriate, if the proposal network needs to model a big or unbounded region.
+    """
+    proposal_net_use_separate_contraction: bool = False
+    """use a separate contraction for the proposal network (modeling both fg & bg regions)."""
+    proposal_net_contraction_scale_factor: float = 1.0
+    """scale_factor for the separate SceneContraction of the proposal network."""
+    num_proposal_samples_per_ray_for_eikonal_loss: int = 0
 
 
 class NeuSFactoModel(NeuSModel):
@@ -90,35 +105,49 @@ class NeuSFactoModel(NeuSModel):
 
         self.density_fns = []
         num_prop_nets = self.config.num_proposal_iterations
+        
         # Build the proposal network(s)
+        if self.config.proposal_net_use_separate_contraction:
+            proposal_contraction = SceneContraction(
+                order=float("inf"), scale_factor=self.config.proposal_net_contraction_scale_factor
+            )
+        else:
+            proposal_contraction = self.scene_contraction
+        
         self.proposal_networks = torch.nn.ModuleList()
         if self.config.use_same_proposal_network:
             assert len(self.config.proposal_net_args_list) == 1, "Only one proposal network is allowed."
             prop_net_args = self.config.proposal_net_args_list[0]
             network = HashMLPDensityField(
-                self.scene_box.aabb, spatial_distortion=self.scene_contraction, **prop_net_args
+                self.scene_box.aabb, spatial_distortion=proposal_contraction, **prop_net_args,
+                spatial_normalization_region=self.config.proposal_net_spatial_normalization_region,
             )
             self.proposal_networks.append(network)
             self.density_fns.extend([network.density_fn for _ in range(num_prop_nets)])
         else:
             for i in range(num_prop_nets):
-                prop_net_args = self.config.proposal_net_args_list[min(i, len(self.config.proposal_net_args_list) - 1)]
+                prop_net_args = self.config.proposal_net_args_list[
+                    min(i, len(self.config.proposal_net_args_list) - 1)]
                 network = HashMLPDensityField(
-                    self.scene_box.aabb,
-                    spatial_distortion=self.scene_contraction,
-                    **prop_net_args,
+                    self.scene_box.aabb, spatial_distortion=proposal_contraction, **prop_net_args,
+                    spatial_normalization_region=self.config.proposal_net_spatial_normalization_region,
                 )
                 self.proposal_networks.append(network)
             self.density_fns.extend([network.density_fn for network in self.proposal_networks])
 
-        # update proposal network every iterations
-        update_schedule = lambda step: -1
+        # proposal network scheduler
+        # TODO: previously trained NeuSFacto models use update_scheduler=-1 -> might lead to performance change
+        update_schedule = lambda step: np.clip(
+            np.interp(step, [0, self.config.proposal_warmup], [0, self.config.proposal_update_every]),
+            1,
+            self.config.proposal_update_every,
+        )
         
         self.proposal_sampler = ProposalNetworkSampler(
             num_nerf_samples_per_ray=self.config.num_neus_samples_per_ray,
             num_proposal_samples_per_ray=self.config.num_proposal_samples_per_ray,
             num_proposal_network_iterations=self.config.num_proposal_iterations,
-            use_uniform_sampler=True,
+            use_uniform_sampler=self.config.proposal_use_uniform_sampler,
             single_jitter=self.config.use_single_jitter,
             update_sched=update_schedule,
         )
@@ -162,7 +191,9 @@ class NeuSFactoModel(NeuSModel):
         return callbacks
 
     def sample_and_forward_field(self, ray_bundle: RayBundle):
-        ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
+        ray_samples, weights_list, ray_samples_list = self.proposal_sampler(
+            ray_bundle, density_fns=self.density_fns
+        )
 
         field_outputs = self.field(ray_samples, return_alphas=True)
         weights, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(
@@ -187,9 +218,8 @@ class NeuSFactoModel(NeuSModel):
         loss_dict = super().get_loss_dict(outputs, batch, metrics_dict)
 
         if self.training:
-            loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
-                outputs["weights_list"], outputs["ray_samples_list"]
-            )
+            self._compute_interlevel_loss(outputs, loss_dict)
+            self._compute_proposal_eikonal_loss(outputs, loss_dict)
 
         return loss_dict
 
@@ -199,10 +229,53 @@ class NeuSFactoModel(NeuSModel):
         metrics_dict, images_dict = super().get_image_metrics_and_images(outputs, batch)
         for i in range(self.config.num_proposal_iterations):
             key = f"prop_depth_{i}"
+            # TODO: set depth[accumulation < 0.1] = depth[accumulation >= 0.1].min()
             prop_depth_i = colormaps.apply_depth_colormap(
                 outputs[key],
-                accumulation=outputs["accumulation"],
+                accumulation=outputs["accumulation"],  # NOTE: this would remove bg depths
             )
             images_dict[key] = prop_depth_i
 
         return metrics_dict, images_dict
+
+    def _compute_interlevel_loss(self, outputs: Dict[str, torch.Tensor], loss_dict: Dict[str, torch.Tensor]):
+        weights_list, ray_samples_list = self._get_interlevel_loss_inputs(outputs)
+        interlevel_loss_val = interlevel_loss(weights_list, ray_samples_list)
+        loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss_val
+    
+    def _get_interlevel_loss_inputs(self, outputs):
+        weights_list = outputs["weights_list"]  # (n_rays, n_samples, 1)
+        ray_samples_list = outputs["ray_samples_list"]  # (n_rays, n_samples)
+        
+        if not self.handle_no_intersect_rays:
+            return weights_list, ray_samples_list
+        
+        # ignore rays not intersecting the fg aabb
+        no_intersect_mask = outputs["no_intersect_mask"][..., 0]  # (n_rays, )
+        weights_list = [weights[~no_intersect_mask] for weights in weights_list]
+        ray_samples_list = [ray_samples[~no_intersect_mask] for ray_samples in ray_samples_list]
+        
+        return weights_list, ray_samples_list
+
+    def _compute_proposal_eikonal_loss(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        loss_dict: Dict[str, torch.Tensor]
+    ):
+        """sample additional ray samples from the proposal samples and compute the eikonal loss.
+        this aims to regularize the internal geometry of the reconstruction.
+        """
+        n_eikonal_samples = self.config.num_proposal_samples_per_ray_for_eikonal_loss
+        if n_eikonal_samples <= 0:
+            return
+        
+        _, ray_samples_list = self._get_interlevel_loss_inputs(outputs)  # TODO: called twice per iter, should cache results
+        ray_samples_list = [s.frustums.get_start_positions() for s in ray_samples_list[:-1]]
+        # TODO: maybe it's better to just sample from the uniform samples?
+        ray_samples = torch.cat(ray_samples_list, dim=1)  # (n_rays, n_samples, 3)
+        n_rays, n_samples = ray_samples.shape[:2]
+        if n_eikonal_samples < n_samples:  # sample with replacement for speed
+            _inds = torch.randint(n_samples, (n_rays, n_eikonal_samples), device=ray_samples.device)
+            ray_samples = ray_samples.gather(1, _inds[..., None].expand(-1, -1, 3))
+        eik_grads = self.field.gradient(ray_samples.view(-1, 3))  # (*, 3)
+        loss_dict["proposal_eikonal_loss"] = ((eik_grads.norm(2, dim=-1) - 1) ** 2).mean() * self.config.eikonal_loss_mult

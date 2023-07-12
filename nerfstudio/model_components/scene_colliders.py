@@ -24,7 +24,7 @@ from torchtyping import TensorType
 
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.data.scene_box import SceneBox
-
+from nerfstudio.utils import profiler
 
 class SceneCollider(nn.Module):
     """Module for setting near and far values for rays."""
@@ -90,7 +90,7 @@ class AABBBoxCollider(SceneCollider):
         # clamp to near plane
         near_plane = self.near_plane if self.training else 0
         nears = torch.clamp(nears, min=near_plane)
-        fars = torch.maximum(fars, nears + 1e-6)
+        fars = torch.maximum(fars, nears + 1e-6)  # NOTE: this would cause numerical issue when sample along the ray
 
         return nears, fars
 
@@ -130,34 +130,104 @@ class NearFarCollider(SceneCollider):
 
 
 class SphereCollider(SceneCollider):
-    """Sets the nears and fars with intersection with sphere.
-
-    Args:
-        radius: radius of sphere
-        soft_intersection: default False, we clamp the value if not intersection found
-        if set to True, the distance between near and far is always  2*radius,
+    """Sets the nears and fars with ray-sphere intersection.
     """
 
-    def __init__(self, radius: float = 1.0, soft_intersection=False, **kwargs) -> None:
-        self.radius = radius
-        self.soft_intersection = soft_intersection
+    def __init__(self, radius: float = 1., near_plane: float = 0.1, far_plane: float = 1000.0, **kwargs) -> None:
         super().__init__(**kwargs)
+        self.radius = radius
+        self.near_plane = near_plane
+        self.far_plane = far_plane
 
     def forward(self, ray_bundle: RayBundle) -> RayBundle:
-        ray_cam_dot = (ray_bundle.directions * ray_bundle.origins).sum(dim=-1, keepdims=True)
-        under_sqrt = ray_cam_dot**2 - (ray_bundle.origins.norm(p=2, dim=-1, keepdim=True) ** 2 - self.radius**2)
+        rr = self.radius ** 2
+        ray_cam_dot = (ray_bundle.directions * ray_bundle.origins).sum(dim=-1, keepdims=True)  # negative
+        no_intersect_mask = ray_cam_dot >= 0
+        dd = ray_bundle.origins.norm(p=2, dim=-1, keepdim=True) ** 2 - ray_cam_dot ** 2
+        no_intersect_mask |= (dd >= rr)
+        half_len_squared = rr - dd
+        
+        intersections = torch.sqrt(half_len_squared) * dd.new_tensor([-1, 1]) - ray_cam_dot
+        nears, fars = intersections[:, [0]], intersections[:, [1]]
+        nears = torch.where(no_intersect_mask, torch.full_like(nears, self.near_plane), nears)
+        fars = torch.where(no_intersect_mask, torch.full_like(fars, self.far_plane), fars)
+        
+        ray_bundle.nears = nears
+        ray_bundle.fars = fars
+        if isinstance(ray_bundle.metadata, dict):
+            ray_bundle.metadata["no_intersect_mask"] = no_intersect_mask
+        else:
+            ray_bundle.metadata = {"no_intersect_mask": no_intersect_mask}
+        
+        return ray_bundle
 
-        # sanity check
-        under_sqrt = under_sqrt.clamp_min(0.01)
 
-        if self.soft_intersection:
-            under_sqrt = torch.ones_like(under_sqrt) * self.radius
+class AABBBoxNearFarCollider(SceneCollider):
+    """Use AABBBoxCollider for rays intersecting the scene box and NearFarCollider otherwise.
+    
+    NOTE: the distance nears and fars inferred from ray-aabb intersection can be near, which cannot be handled properly using float32.
+    """
+    
+    def __init__(self, scene_box: SceneBox, near_plane: float = 0.1, far_plane: float = 1000.0, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.scene_box = scene_box
+        self.near_plane = near_plane
+        self.far_plane = far_plane
+    
+    def _intersect_with_aabb(
+        self, rays_o: TensorType["num_rays", 3], rays_d: TensorType["num_rays", 3], aabb: TensorType[2, 3]
+    ):
+        """Compute nears and fars for all rays. """
+        # avoid divide by zero
+        dir_fraction = 1.0 / (rays_d + 1e-6)
 
-        sphere_intersections = (
-            torch.sqrt(under_sqrt) * torch.Tensor([-1, 1]).float().to(under_sqrt.device) - ray_cam_dot
+        # x
+        t1 = (aabb[0, 0] - rays_o[:, 0:1]) * dir_fraction[:, 0:1]
+        t2 = (aabb[1, 0] - rays_o[:, 0:1]) * dir_fraction[:, 0:1]
+        # y
+        t3 = (aabb[0, 1] - rays_o[:, 1:2]) * dir_fraction[:, 1:2]
+        t4 = (aabb[1, 1] - rays_o[:, 1:2]) * dir_fraction[:, 1:2]
+        # z
+        t5 = (aabb[0, 2] - rays_o[:, 2:3]) * dir_fraction[:, 2:3]
+        t6 = (aabb[1, 2] - rays_o[:, 2:3]) * dir_fraction[:, 2:3]
+        
+        tx_min, tx_max = torch.minimum(t1, t2), torch.maximum(t1, t2)
+        ty_min, ty_max = torch.minimum(t3, t4), torch.maximum(t3, t4)
+        tz_min, tz_max = torch.minimum(t5, t6), torch.maximum(t5, t6)
+        
+        # no_intersect_mask = torch.logical_or(
+        #     torch.logical_or(tx_min > ty_max, tx_min > tz_max),
+        #     torch.logical_or(ty_min > tx_max, tz_min > tx_max)
+        # )[..., 0]
+        
+        nears = torch.max(torch.cat([tx_min, ty_min, tz_min], dim=1), dim=1).values
+        fars = torch.min(torch.cat([tx_max, ty_max, tz_max], dim=1), dim=1).values
+        no_intersect_mask = torch.logical_or(nears - fars >= -1e-3, fars <= 0)  # use nears >= fars might cause the nears and fars being too close, which finally leads to negative weights due to numerical issues.
+        bottom_intersect_mask = (~no_intersect_mask) & (fars == t4[..., 0])  # fars == t4 & t4 == ty_max
+        nears = torch.where(no_intersect_mask, torch.full_like(nears, self.near_plane), nears)  # type: ignore
+        fars = torch.where(no_intersect_mask, torch.full_like(fars, self.far_plane), fars)  # type: ignore
+        return nears, fars, no_intersect_mask, bottom_intersect_mask
+    
+    def set_nears_and_fars(self, ray_bundle: RayBundle) -> RayBundle:
+        """Intersects the rays with the scene box and updates the near and far values.
+        Populates nears and fars fields and returns the ray_bundle.
+
+        Args:
+            ray_bundle: specified ray bundle to operate on
+        """
+        # TODO: use NearFarCollider if not intersection found
+        aabb = self.scene_box.aabb
+        nears, fars, no_intersect_mask, bottom_intersect_mask = self._intersect_with_aabb(
+            ray_bundle.origins, ray_bundle.directions, aabb
         )
-        sphere_intersections = sphere_intersections.clamp_min(0.01)
-
-        ray_bundle.nears = sphere_intersections[:, 0:1]
-        ray_bundle.fars = sphere_intersections[:, 1:2]
+        ray_bundle.nears = nears[..., None]
+        ray_bundle.fars = fars[..., None]
+        if isinstance(ray_bundle.metadata, dict):
+            ray_bundle.metadata["no_intersect_mask"] = no_intersect_mask[..., None]
+            ray_bundle.metadata["bottom_intersect_mask"] = bottom_intersect_mask[..., None]
+        else:
+            ray_bundle.metadata = {
+                "no_intersect_mask": no_intersect_mask[..., None],
+                "bottom_intersect_mask": bottom_intersect_mask[..., None],
+            }
         return ray_bundle

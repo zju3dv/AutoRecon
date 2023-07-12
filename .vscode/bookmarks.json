@@ -1,0 +1,149 @@
+{
+	"files": [
+		{
+			"path": "nerfstudio/models/base_surface_model.py",
+			"bookmarks": [
+				{
+					"line": 241,
+					"column": 8,
+					"label": "SurfaceModel: fg sampling & inference"
+				},
+				{
+					"line": 262,
+					"column": 8,
+					"label": "SurfaceModel: bg sampling & inference"
+				},
+				{
+					"line": 278,
+					"column": 12,
+					"label": "SurfaceModel:fg & bg rendering composition"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/configs/method_configs.py",
+			"bookmarks": [
+				{
+					"line": 813,
+					"column": 0,
+					"label": "Config: all base configs"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/field_components/spatial_distortions.py",
+			"bookmarks": [
+				{
+					"line": 41,
+					"column": 42,
+					"label": "SceneContraction (MipNeRF-360)"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/data/datamanagers/base_datamanager.py",
+			"bookmarks": [
+				{
+					"line": 64,
+					"column": 0,
+					"label": "DataParser::all dataparser configs"
+				},
+				{
+					"line": 322,
+					"column": 0,
+					"label": "VanillaDataManager::create datasets"
+				},
+				{
+					"line": 410,
+					"column": 4,
+					"label": "BaseDatamanager::fetch a batch of data for training"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/models/neus_facto.py",
+			"bookmarks": [
+				{
+					"line": 163,
+					"column": 37,
+					"label": "NeuSFacto::Fg fields inference"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/configs/base_config.py",
+			"bookmarks": [
+				{
+					"line": 199,
+					"column": 0,
+					"label": "Config::BaseConfig"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/engine/trainer.py",
+			"bookmarks": [
+				{
+					"line": 73,
+					"column": 4,
+					"label": "Trainer::basic setups"
+				},
+				{
+					"line": 329,
+					"column": 4,
+					"label": "Trainer::eval_iteration"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/model_components/ray_samplers.py",
+			"bookmarks": [
+				{
+					"line": 500,
+					"column": 0,
+					"label": "RaySampler::ProposalNetworkSampler"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/fields/density_fields.py",
+			"bookmarks": [
+				{
+					"line": 99,
+					"column": 8,
+					"label": "ProposalNetwork::position normalization"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/data/datasets/base_dataset.py",
+			"bookmarks": [
+				{
+					"line": 107,
+					"column": 8,
+					"label": "InputDataset::parse additional inputs"
+				}
+			]
+		},
+		{
+			"path": "nerfstudio/pipelines/base_pipeline.py",
+			"bookmarks": [
+				{
+					"line": 230,
+					"column": 8,
+					"label": "VanillaPipeline::build model"
+				}
+			]
+		},
+		{
+			"path": "scripts/train.py",
+			"bookmarks": [
+				{
+					"line": 231,
+					"column": 4,
+					"label": "train::save_config()"
+				}
+			]
+		}
+	]
+}

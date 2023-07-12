@@ -42,6 +42,8 @@ class FieldHeadNames(Enum):
     ALPHA = "alpha"
     GRADIENT = "gradient"
     OCCUPANCY = "occupancy"
+    FEATURE = "feature"
+    FG_SEG = "fg_segmentation"
 
 
 class FieldHead(FieldComponent):

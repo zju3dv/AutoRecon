@@ -97,7 +97,7 @@ class ScalingAndOffset(Encoding):
 
 
 class NeRFEncoding(Encoding):
-    """Multi-scale sinousoidal encodings. Support ``integrated positional encodings`` if covariances are provided.
+    """Multi-scale sinusoidal encodings. Support ``integrated positional encodings`` if covariances are provided.
     Each axis is encoded with frequencies ranging from 2^min_freq_exp to 2^max_freq_exp.
 
     Args:
@@ -140,16 +140,8 @@ class NeRFEncoding(Encoding):
         Returns:
             Output values will be between -1 and 1
         """
-        # TODO check scaling here but just comment it for now
-        # in_tensor = 2 * torch.pi * in_tensor  # scale to [0, 2pi]
+        in_tensor = 2 * torch.pi * in_tensor  # scale to [0, 2pi]
         freqs = 2 ** torch.linspace(self.min_freq, self.max_freq, self.num_frequencies).to(in_tensor.device)
-        # freqs = 2 ** (
-        #    torch.sin(torch.linspace(self.min_freq, torch.pi / 2.0, self.num_frequencies)) * self.max_freq
-        # ).to(in_tensor.device)
-        # freqs = 2 ** (
-        #     torch.linspace(self.min_freq, 1.0, self.num_frequencies).to(in_tensor.device) ** 0.2 * self.max_freq
-        # )
-
         scaled_inputs = in_tensor[..., None] * freqs  # [..., "input_dim", "num_scales"]
         scaled_inputs = scaled_inputs.view(*scaled_inputs.shape[:-2], -1)  # [..., "input_dim" * "num_scales"]
 

@@ -1,3 +1,5 @@
+*_debug_*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -196,3 +198,11 @@ camera_paths/
 vis_results/
 W/
 *.ply
+ckpts/
+notebooks/
+media/
+outputs/
+/Dockerfile
+/.readthedocs.yaml
+vis_meshes/
+README_*.md

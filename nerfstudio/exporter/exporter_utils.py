@@ -55,7 +55,9 @@ class Mesh:
     faces: TensorType["num_faces", 3]
     """Faces of the mesh."""
     normals: TensorType["num_verts", 3]
-    """Normals of the mesh."""
+    """Normals of the mesh vertices."""
+    face_normals: TensorType["num_faces", 3] = None
+    """Normals of the mesh faces."""
     colors: Optional[TensorType["num_verts", 3]] = None
     """Colors of the mesh."""
 
@@ -68,6 +70,7 @@ def get_mesh_from_pymeshlab_mesh(mesh: pymeshlab.Mesh) -> Mesh:
         vertices=torch.from_numpy(mesh.vertex_matrix()).float(),
         faces=torch.from_numpy(mesh.face_matrix()).long(),
         normals=torch.from_numpy(np.copy(mesh.vertex_normal_matrix())).float(),
+        face_normals=torch.from_numpy(np.copy(mesh.face_normal_matrix())).float(),
         colors=torch.from_numpy(mesh.vertex_color_matrix()).float(),
     )
 

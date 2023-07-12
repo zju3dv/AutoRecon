@@ -22,6 +22,7 @@ from typing import Callable
 
 from rich.console import Console
 
+import torch
 from nerfstudio.configs import base_config as cfg
 from nerfstudio.utils import comms
 from nerfstudio.utils.decorators import (
@@ -37,11 +38,33 @@ PROFILER = []
 
 def time_function(func: Callable) -> Callable:
     """Decorator: time a function call"""
-
     def wrapper(*args, **kwargs):
-        start = time.time()
-        ret = func(*args, **kwargs)
         if PROFILER:
+            # torch.cuda.synchronize()
+            start = time.time()
+        
+        ret = func(*args, **kwargs)
+        
+        if PROFILER:
+            # torch.cuda.synchronize()
+            class_str = func.__qualname__
+            PROFILER[0].update_time(class_str, start, time.time())
+        return ret
+
+    return wrapper
+
+
+def time_function_cuda(func: Callable) -> Callable:
+    """Decorator: time a function call"""
+    def wrapper(*args, **kwargs):
+        if PROFILER:
+            torch.cuda.synchronize()
+            start = time.time()
+        
+        ret = func(*args, **kwargs)
+        
+        if PROFILER:
+            torch.cuda.synchronize()
             class_str = func.__qualname__
             PROFILER[0].update_time(class_str, start, time.time())
         return ret

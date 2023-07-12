@@ -23,6 +23,7 @@ from typing import Dict
 import tyro
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
+from nerfstudio.configs.autorecon import method_configs as autorecon_method_configs
 from nerfstudio.configs.base_config import (
     Config,
     SchedulerConfig,
@@ -73,6 +74,8 @@ from nerfstudio.pipelines.base_pipeline import (
 from nerfstudio.pipelines.dynamic_batch import DynamicBatchPipelineConfig
 
 method_configs: Dict[str, Config] = {}
+method_configs.update(autorecon_method_configs)
+
 descriptions = {
     "nerfacto": "Recommended real-time model tuned for real captures. This model will be continually updated.",
     "instant-ngp": "Implementation of Instant-NGP. Recommended real-time model for bounded synthetic data.",
@@ -98,6 +101,7 @@ descriptions = {
     "neus-facto-bigmlp": "NeuS-facto with big MLP, it is used in training heritage data with 8 gpus",
 }
 
+# assume the entire scene is bounded by a unit cube
 method_configs["neus-facto"] = Config(
     method_name="neus-facto",
     trainer=TrainerConfig(
@@ -127,12 +131,12 @@ method_configs["neus-facto"] = Config(
                 beta_init=0.3,
                 use_appearance_embedding=False,
             ),
-            background_model="none",
+            background_model="none",  # FIXME
             eval_num_rays_per_chunk=1024,
         ),
     ),
     optimizers={
-        "proposal_networks": {
+        "proposal_networks": {  # fixed gamma=0.3 and n_milestones=3
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
             "scheduler": MultiStepSchedulerConfig(max_steps=20000),
         },
@@ -374,7 +378,7 @@ method_configs["neus"] = Config(
         steps_per_eval_batch=5000,
         steps_per_save=20000,
         steps_per_eval_all_images=1000000,  # set to a very large model so we don't eval with all images
-        max_num_iterations=100000,
+        max_num_iterations=100000,  # FIXME: 300000?
         mixed_precision=False,
     ),
     pipeline=VanillaPipelineConfig(
@@ -618,7 +622,6 @@ method_configs["neus-acc"] = Config(
     vis="viewer",
 )
 
-
 method_configs["nerfacto"] = Config(
     method_name="nerfacto",
     trainer=TrainerConfig(
@@ -638,11 +641,11 @@ method_configs["nerfacto"] = Config(
     optimizers={
         "proposal_networks": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": MultiStepSchedulerConfig(max_steps=300000),
+            "scheduler": MultiStepSchedulerConfig(max_steps=300000),  # FIXME: 30000?
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": MultiStepSchedulerConfig(max_steps=300000),
+            "scheduler": MultiStepSchedulerConfig(max_steps=300000),  # FIXME: 30000?
         },
     },
     viewer=ViewerConfig(num_rays_per_chunk=1 << 15),

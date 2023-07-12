@@ -146,6 +146,8 @@ class MonoSDFDataParserConfig(DataParserConfig):
     neighbors_shuffle: Optional[bool] = False
     pairs_sorted_ascending: Optional[bool] = True
     """if src image pairs are sorted in ascending order by similarity i.e. the last element is the most similar to the first (ref)"""
+    use_ori_res_image: bool = False
+    """use images w/ resolutions of the original dataset (e.g., 1600x1200 for DTU)"""
 
 
 @dataclass
@@ -161,10 +163,16 @@ class MonoSDFScene(DataParser):
             data_paths = sorted(data_paths)
             return data_paths
 
-        image_paths = glob_data(str(self.config.data / "*_rgb.png"))
+        if self.config.use_ori_res_image:
+            image_paths = glob_data(str(self.config.data / "image" / "*.png"))
+            assert not self.config.include_mono_prior, 'include_mono_prior not supported when use_ori_res_image is True'
+            assert self.config.center_crop_type == 'no_crop', 'center_crop_type must be no_crop when use_ori_res_image is True'
+            depth_paths, normal_paths = [], []
+        else:
+            image_paths = glob_data(str(self.config.data / "*_rgb.png"))
 
-        depth_paths = glob_data(str(self.config.data / "*_depth.npy"))
-        normal_paths = glob_data(str(self.config.data / "*_normal.npy"))
+            depth_paths = glob_data(str(self.config.data / "*_depth.npy"))
+            normal_paths = glob_data(str(self.config.data / "*_normal.npy"))
 
         n_images = len(image_paths)
 
@@ -300,7 +308,10 @@ class MonoSDFScene(DataParser):
         # cameras.rescale_output_resolution(scaling_factor=1.0 / self.config.downscale_factor)
         if self.config.include_mono_prior:
             additional_inputs_dict = {
-                "cues": {"func": get_depths_and_normals, "kwargs": {"depths": depth_images, "normals": normal_images}}
+                "cues": {
+                    "func": get_depths_and_normals,
+                    "kwargs": {"depths": depth_images,"normals": normal_images}
+                }
             }
         else:
             additional_inputs_dict = {}

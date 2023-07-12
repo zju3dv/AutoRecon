@@ -59,8 +59,13 @@ class SemanticNerfWModelConfig(NerfactoModelConfig):
     """Nerfacto Model Config"""
 
     _target: Type = field(default_factory=lambda: SemanticNerfWModel)
+    semantic_mult: float = 1.0
     use_transient_embedding: bool = False
     """Whether to use transient embedding."""
+    scene_contraction_scale_factor: float = 1.0
+    """Scale positions by this factor before applying contraction.
+    This is useful when the [-1, 1] region (no contraction) is too small and only covers a small portion of the scene.
+    """
 
 
 class SemanticNerfWModel(Model):
@@ -81,7 +86,8 @@ class SemanticNerfWModel(Model):
         """Set the fields and modules."""
         super().populate_modules()
 
-        scene_contraction = SceneContraction(order=float("inf"))
+        scene_contraction = SceneContraction(order=float("inf"),
+                                             scale_factor=self.config.scene_contraction_scale_factor)
 
         if self.config.use_transient_embedding:
             raise ValueError("Transient embedding is not fully working for semantic nerf-w.")
@@ -193,8 +199,10 @@ class SemanticNerfWModel(Model):
         accumulation = self.renderer_accumulation(weights=weights_static)
 
         outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
-        outputs["weights_list"] = weights_list
-        outputs["ray_samples_list"] = ray_samples_list
+        
+        if self.training:
+            outputs["weights_list"] = weights_list
+            outputs["ray_samples_list"] = ray_samples_list
 
         for i in range(self.config.num_proposal_iterations):
             outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
@@ -213,7 +221,7 @@ class SemanticNerfWModel(Model):
 
         # semantics colormaps
         semantic_labels = torch.argmax(torch.nn.functional.softmax(outputs["semantics"], dim=-1), dim=-1)
-        outputs["semantics_colormap"] = self.semantics.colors[semantic_labels]
+        # outputs["semantics_colormap"] = self.semantics.colors[semantic_labels]
 
         return outputs
 
@@ -221,29 +229,28 @@ class SemanticNerfWModel(Model):
         metrics_dict = {}
         image = batch["image"].to(self.device)
         metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
-        metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
+        if self.training:
+            metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         loss_dict = {}
         image = batch["image"].to(self.device)
-        loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
-            outputs["weights_list"], outputs["ray_samples_list"]
-        )
-        assert metrics_dict is not None and "distortion" in metrics_dict
-        loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
-
-        # transient loss
-        if self.training and self.config.use_transient_embedding:
-            betas = outputs["uncertainty"]
-            loss_dict["uncertainty_loss"] = 3 + torch.log(betas).mean()
-            loss_dict["density_loss"] = 0.01 * outputs["density_transient"].mean()
-            loss_dict["rgb_loss"] = (((image - outputs["rgb"]) ** 2).sum(-1) / (betas[..., 0] ** 2)).mean()
-        else:
-            loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"])
+        loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"])
+        if self.training:
+            loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
+                outputs["weights_list"], outputs["ray_samples_list"]
+            )
+            assert metrics_dict is not None and "distortion" in metrics_dict
+            loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
+            if self.config.use_transient_embedding:
+                betas = outputs["uncertainty"]
+                loss_dict["uncertainty_loss"] = 3 + torch.log(betas).mean()
+                loss_dict["density_loss"] = 0.01 * outputs["density_transient"].mean()
+                loss_dict["rgb_loss"] = (((image - outputs["rgb"]) ** 2).sum(-1) / (betas[..., 0] ** 2)).mean()    
 
         # semantic loss
-        loss_dict["semantics_loss"] = self.cross_entropy_loss(outputs["semantics"], batch["semantics"][..., 0].long())
+        loss_dict["semantics_loss"] = self.config.semantic_mult * self.cross_entropy_loss(outputs["semantics"], batch["semantics"][..., 0].long())
         return loss_dict
 
     def get_image_metrics_and_images(
@@ -287,9 +294,10 @@ class SemanticNerfWModel(Model):
 
         # semantics
         semantic_labels = torch.argmax(torch.nn.functional.softmax(outputs["semantics"], dim=-1), dim=-1)
-        images_dict["semantics_colormap"] = self.semantics.colors[semantic_labels]
+        images_dict["semantics_colormap"] = self.semantics.colors.to(self.device)[semantic_labels]
 
         # valid mask
-        images_dict["mask"] = batch["mask"].repeat(1, 1, 3)
+        if "mask" in batch:
+            images_dict["mask"] = batch["mask"].repeat(1, 1, 3)
 
         return metrics_dict, images_dict

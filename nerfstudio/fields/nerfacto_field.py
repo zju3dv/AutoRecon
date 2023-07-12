@@ -18,6 +18,7 @@ Field for compound nerf model, adds scene contraction and image embeddings to in
 
 
 from typing import Dict, Optional, Tuple
+from typing_extensions import Literal
 
 import numpy as np
 import torch
@@ -81,6 +82,7 @@ class TCNNNerfactoField(Field):
         transient_embedding_dim: dimension of transient embedding
         use_average_appearance_embedding: whether to use average appearance embedding or zeros for inference
         spatial_distortion: spatial distortion to apply to the scene
+        spatial_normalization_region: specify the reigion get normalized to the [[0, 0, 0], [1, 1, 1]] feature grid
     """
 
     def __init__(
@@ -103,8 +105,10 @@ class TCNNNerfactoField(Field):
         use_semantics: bool = False,
         num_semantic_classes: int = 100,
         use_pred_normals: bool = False,
+        use_appearance_embedding: bool = True,
         use_average_appearance_embedding: bool = False,
         spatial_distortion: Optional[SpatialDistortion] = None,
+        spatial_normalization_region: Literal["full", "fg", "aabb"] = "full",
     ) -> None:
         super().__init__()
 
@@ -112,8 +116,10 @@ class TCNNNerfactoField(Field):
         self.geo_feat_dim = geo_feat_dim
 
         self.spatial_distortion = spatial_distortion
+        self.spatial_normalization_region = spatial_normalization_region
         self.num_images = num_images
-        self.appearance_embedding_dim = appearance_embedding_dim
+        self.use_appearance_embedding = use_appearance_embedding
+        self.appearance_embedding_dim = appearance_embedding_dim if use_appearance_embedding else 0
         self.embedding_appearance = Embedding(self.num_images, self.appearance_embedding_dim)
         self.use_average_appearance_embedding = use_average_appearance_embedding
         self.use_transient_embedding = use_transient_embedding
@@ -225,7 +231,7 @@ class TCNNNerfactoField(Field):
         if self.spatial_distortion is not None:
             positions = ray_samples.frustums.get_positions()
             positions = self.spatial_distortion(positions)
-            positions = (positions + 2.0) / 4.0
+            positions = self._get_normalized_positions(positions)
         else:
             positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
         self._sample_locations = positions
@@ -254,18 +260,8 @@ class TCNNNerfactoField(Field):
 
         outputs_shape = ray_samples.frustums.directions.shape[:-1]
 
-        # appearance
-        if self.training:
-            embedded_appearance = self.embedding_appearance(camera_indices)
-        else:
-            if self.use_average_appearance_embedding:
-                embedded_appearance = torch.ones(
-                    (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
-                ) * self.embedding_appearance.mean(dim=0)
-            else:
-                embedded_appearance = torch.zeros(
-                    (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
-                )
+        # per-image appearance embedding
+        embedded_appearance = self._get_appeanreance_embedding(camera_indices, directions)
 
         # transients
         if self.use_transient_embedding and self.training:
@@ -304,18 +300,47 @@ class TCNNNerfactoField(Field):
             x = self.mlp_pred_normals(pred_normals_inp).view(*outputs_shape, -1).to(directions)
             outputs[FieldHeadNames.PRED_NORMALS] = self.field_head_pred_normals(x)
 
-        h = torch.cat(
-            [
-                d,
-                density_embedding.view(-1, self.geo_feat_dim),
-                embedded_appearance.view(-1, self.appearance_embedding_dim),
-            ],
-            dim=-1,
-        )
+        features = [d, density_embedding.view(-1, self.geo_feat_dim)]
+        if self.appearance_embedding_dim > 0:
+            features.append(embedded_appearance.view(-1, self.appearance_embedding_dim))
+        
+        h = torch.cat(features, dim=-1)
         rgb = self.mlp_head(h).view(*outputs_shape, -1).to(directions)
         outputs.update({FieldHeadNames.RGB: rgb})
 
         return outputs
+
+    def _get_appeanreance_embedding(self, camera_indices: TensorType, directions: TensorType) -> TensorType:
+        if self.training:
+            if self.use_appearance_embedding:
+                embedded_appearance = self.embedding_appearance(camera_indices)
+            else:  # empty embedding
+                embedded_appearance = torch.zeros(
+                    (*directions.shape[:-1], 0), device=directions.device)
+        else:  # evaluation
+            if self.use_appearance_embedding:
+                if self.use_average_appearance_embedding:  # average embedding
+                    embedded_appearance = torch.ones(
+                        (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
+                    ) * self.embedding_appearance.mean(dim=0)
+                else:  # zero embedding
+                    embedded_appearance = torch.zeros(
+                        (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
+                    )
+            else:  # empty embedding
+                embedded_appearance = torch.zeros(
+                    (*directions.shape[:-1], 0), device=directions.device)
+        return embedded_appearance
+
+    def _get_normalized_positions(self, positions):
+        if self.spatial_normalization_region == 'full':
+            return (positions + 2.0) / 4.0
+        elif self.spatial_normalization_region == 'fg':
+            return (positions + 1.0) / 2.0
+        elif self.config.spatial_normalization_region == 'aabb':
+            return (positions - self.aabb[0]) / (self.aabb[1] - self.aabb[0])
+        else:
+            raise ValueError(f"Unknown spatial normalization region: {self.spatial_normalization_region}")
 
 
 class TorchNerfactoField(Field):
@@ -342,6 +367,7 @@ class TorchNerfactoField(Field):
         self.aabb = Parameter(aabb, requires_grad=False)
         self.spatial_distortion = spatial_distortion
         self.num_images = num_images
+        # FIXME: align w/ TcnnNerfactoField: use_appearance_embedding
         self.appearance_embedding_dim = appearance_embedding_dim
         self.embedding_appearance = Embedding(self.num_images, self.appearance_embedding_dim)
 
@@ -399,15 +425,14 @@ class TorchNerfactoField(Field):
         outputs = {}
         for field_head in self.field_heads:
             encoded_dir = self.direction_encoding(ray_samples.frustums.directions)
+            
+            features = [encoded_dir, density_embedding]  # type: ignore
+            if self.appearance_embedding_dim > 0:
+                features.append(embedded_appearance.view(-1, self.appearance_embedding_dim))
+            
+            # FIXME: mlp_out is computed repeatedly for each field head?
             mlp_out = self.mlp_head(
-                torch.cat(
-                    [
-                        encoded_dir,
-                        density_embedding,  # type:ignore
-                        embedded_appearance.view(-1, self.appearance_embedding_dim),
-                    ],
-                    dim=-1,  # type:ignore
-                )
+                torch.cat(features, dim=-1)
             )
             outputs[field_head.field_head_name] = field_head(mlp_out)
         return outputs

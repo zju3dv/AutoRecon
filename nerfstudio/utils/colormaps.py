@@ -34,6 +34,7 @@ def apply_colormap(image: TensorType["bs":..., 1], cmap="viridis") -> TensorType
         TensorType: Colored image
     """
 
+    # TODO: support more colormaps
     colormap = cm.get_cmap(cmap)
     colormap = torch.tensor(colormap.colors).to(image.device)  # type: ignore
     image_long = (image * 255).long()

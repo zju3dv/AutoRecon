@@ -1,10 +1,13 @@
 from pathlib import Path
+from rich import console
 
 import numpy as np
 import pymeshlab
 import torch
 import trimesh
 from skimage import measure
+
+CONSOLE = console.Console(width=120)
 
 avg_pool_3d = torch.nn.AvgPool3d(2, stride=2)
 upsample = torch.nn.Upsample(scale_factor=2, mode="nearest")
@@ -21,14 +24,16 @@ def get_surface_sliding(
     coarse_mask=None,
     output_path: Path = Path("test.ply"),
     simplify_mesh=True,
+    chunk_size=100000,
+    store_float16=False,  # store intermediate results with float16 to save VRAM
 ):
-    assert resolution % 512 == 0
+    dtype = torch.float32 if not store_float16 else torch.float16
     if coarse_mask is not None:
         # we need to permute here as pytorch's grid_sample use (z, y, x)
         coarse_mask = coarse_mask.permute(2, 1, 0)[None, None].cuda().float()
 
     resN = resolution
-    cropN = 512
+    cropN = min(resN, 512)
     level = 0
     N = resN // cropN
 
@@ -38,10 +43,8 @@ def get_surface_sliding(
     ys = np.linspace(grid_min[1], grid_max[1], N + 1)
     zs = np.linspace(grid_min[2], grid_max[2], N + 1)
 
-    # print(xs)
-    # print(ys)
-    # print(zs)
     meshes = []
+    # TODO: add a status bar
     for i in range(N):
         for j in range(N):
             for k in range(N):
@@ -59,10 +62,13 @@ def get_surface_sliding(
 
                 def evaluate(points):
                     z = []
-                    for _, pnts in enumerate(torch.split(points, 100000, dim=0)):
+                    for _, pnts in enumerate(torch.split(points, chunk_size, dim=0)):
                         z.append(sdf(pnts))
                     z = torch.cat(z, axis=0)
-                    return z
+                    sdf_val = z.to(dtype)
+                    del z
+                    torch.cuda.empty_cache()
+                    return sdf_val
 
                 # construct point pyramids
                 points = points.reshape(cropN, cropN, cropN, 3).permute(3, 0, 1, 2)
@@ -90,7 +96,7 @@ def get_surface_sliding(
                     if mask is None:
                         # only evaluate
                         if coarse_mask is not None:
-                            pts_sdf = torch.ones_like(pts[:, 1])
+                            pts_sdf = torch.ones_like(pts[:, 1], dtpye=dtype)
                             valid_mask = (
                                 torch.nn.functional.grid_sample(coarse_mask, pts[None, None, None])[0, 0, 0, 0] > 0
                             )
@@ -129,7 +135,7 @@ def get_surface_sliding(
 
                 if not (np.min(z) > level or np.max(z) < level):
                     z = z.astype(np.float32)
-                    verts, faces, normals, _ = measure.marching_cubes(
+                    verts, faces, vertex_normals, _ = measure.marching_cubes(
                         volume=z.reshape(cropN, cropN, cropN),  # .transpose([1, 0, 2]),
                         level=level,
                         spacing=(
@@ -139,12 +145,12 @@ def get_surface_sliding(
                         ),
                         mask=current_mask,
                     )
-                    # print(np.array([x_min, y_min, z_min]))
+                    # print(nzp.array([x_min, y_min, z_min]))
                     # print(verts.min(), verts.max())
                     verts = verts + np.array([x_min, y_min, z_min])
                     # print(verts.min(), verts.max())
-
-                    meshcrop = trimesh.Trimesh(verts, faces, normals)
+                    meshcrop = trimesh.Trimesh(verts, faces,
+                                               vertex_normals=vertex_normals)
                     # meshcrop.export(f"{i}_{j}_{k}.ply")
                     meshes.append(meshcrop)
 
@@ -155,8 +161,8 @@ def get_surface_sliding(
     else:
         filename = str(output_path)
         filename_simplify = str(output_path).replace(".ply", "-simplify.ply")
-
         combined.export(filename)
+        CONSOLE.print(f"Marching cube mesh saved: {filename}")
         if simplify_mesh:
             ms = pymeshlab.MeshSet()
             ms.load_new_mesh(filename)
@@ -164,6 +170,7 @@ def get_surface_sliding(
             print("simply mesh")
             ms.meshing_decimation_quadric_edge_collapse(targetfacenum=2000000)
             ms.save_current_mesh(filename_simplify, save_face_color=False)
+            CONSOLE.print(f"Simplified mesh saved: {filename_simplify}")
 
 
 @torch.no_grad()
@@ -176,6 +183,7 @@ def get_surface_occupancy(
     level=0.5,
     device=None,
     output_path: Path = Path("test.ply"),
+    chunk_size=100000,
 ):
     grid_min = bounding_box_min
     grid_max = bounding_box_max
@@ -189,7 +197,7 @@ def get_surface_occupancy(
 
     def evaluate(points):
         z = []
-        for _, pnts in enumerate(torch.split(points, 100000, dim=0)):
+        for _, pnts in enumerate(torch.split(points, chunk_size, dim=0)):
             z.append(occupancy_fn(pnts.contiguous()).contiguous())
         z = torch.cat(z, axis=0)
         return z

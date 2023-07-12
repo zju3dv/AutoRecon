@@ -16,6 +16,7 @@
 
 
 from typing import Dict, Optional, Tuple
+from typing_extensions import Literal
 
 import torch
 from torch import nn
@@ -47,6 +48,7 @@ class NeRFField(Field):
         skip_connections: Where to add skip connection in base MLP.
         use_integrated_encoding: Used integrated samples as encoding input.
         spatial_distortion: Spatial distortion.
+        spatial_normalization_region: normalization after spatial distortion.
     """
 
     def __init__(
@@ -61,12 +63,16 @@ class NeRFField(Field):
         field_heads: Tuple[FieldHead] = (RGBFieldHead(),),
         use_integrated_encoding: bool = False,
         spatial_distortion: Optional[SpatialDistortion] = None,
+        spatial_normalization_region: Literal["full", "fg", "none"] = "none",
     ) -> None:
         super().__init__()
         self.position_encoding = position_encoding
         self.direction_encoding = direction_encoding
         self.use_integrated_encoding = use_integrated_encoding
         self.spatial_distortion = spatial_distortion
+        self.spatial_normalization_region = spatial_normalization_region
+        if (use_integrated_encoding or spatial_distortion is None) and spatial_normalization_region != "none":
+            raise NotImplementedError
 
         self.mlp_base = MLP(
             in_dim=self.position_encoding.get_out_dim(),
@@ -98,6 +104,7 @@ class NeRFField(Field):
             positions = ray_samples.frustums.get_positions()
             if self.spatial_distortion is not None:
                 positions = self.spatial_distortion(positions)
+                positions = self._get_normalized_positions(positions)
             encoded_xyz = self.position_encoding(positions)
         base_mlp_out = self.mlp_base(encoded_xyz)
         density = self.field_output_density(base_mlp_out)
@@ -112,3 +119,13 @@ class NeRFField(Field):
             mlp_out = self.mlp_head(torch.cat([encoded_dir, density_embedding], dim=-1))  # type: ignore
             outputs[field_head.field_head_name] = field_head(mlp_out)
         return outputs
+
+    def _get_normalized_positions(self, positions):
+        if self.spatial_normalization_region == 'full':
+            return (positions + 2.0) / 4.0
+        elif self.spatial_normalization_region == 'fg':
+            return (positions + 1.0) / 2.0
+        elif self.config.spatial_normalization_region == 'none':
+            return positions
+        else:
+            raise ValueError(f"Unknown spatial normalization region: {self.spatial_normalization_region}")

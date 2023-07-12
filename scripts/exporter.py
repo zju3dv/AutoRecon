@@ -118,16 +118,25 @@ class ExportTSDFMesh(Exporter):
     """Minimum of the bounding box, used if use_bounding_box is True."""
     bounding_box_max: Tuple[float, float, float] = (1, 1, 1)
     """Minimum of the bounding box, used if use_bounding_box is True."""
+    use_train_scene_box: bool = False
+    """use the tight scene box for training"""
+    object_bounds_extend_ratio: float = -0.05  # to avoid artifact near to fg bbox
     texture_method: Literal["tsdf", "nerf"] = "nerf"
     """Method to texture the mesh with. Either 'tsdf' or 'nerf'."""
+    target_num_faces: Optional[int] = 50000
+    """Target number of faces for the mesh to texture."""
     px_per_uv_triangle: int = 4
     """Number of pixels per UV triangle."""
     unwrap_method: Literal["xatlas", "custom"] = "xatlas"
     """The method to use for unwrapping the mesh."""
     num_pixels_per_side: int = 2048
     """If using xatlas for unwrapping, the pixels per side of the texture image."""
-    target_num_faces: Optional[int] = 50000
-    """Target number of faces for the mesh to texture."""
+    foreground_only: bool = True
+    """only render depth & rgb of the foreground field"""
+    num_rays_per_chunk: int = 4096
+    background_color: Literal["random", "last_sample", "white", "black"] = "white"
+    mask_depth_with_acc: bool = True
+    depth_renderer_mode: Literal["expected", "median"] = "median"
 
     def main(self) -> None:
         """Export mesh"""
@@ -135,7 +144,21 @@ class ExportTSDFMesh(Exporter):
         if not self.output_dir.exists():
             self.output_dir.mkdir(parents=True)
 
-        _, pipeline, _ = eval_setup(self.load_config)
+        _, pipeline, _ = eval_setup(
+            self.load_config,
+            eval_num_rays_per_chunk=self.num_rays_per_chunk,
+            config_override_fn=self._config_override_fn
+        )
+        
+        if self.use_train_scene_box:
+            self.use_bounding_box = True
+            aabb = pipeline.datamanager.train_dataset.scene_box.aabb
+            self.bounding_box_min = aabb[0].cpu().numpy()
+            self.bounding_box_max = aabb[1].cpu().numpy()
+            _bbox_str = str(
+                np.stack([self.bounding_box_min, self.bounding_box_max], 0).round(2)
+            )
+            CONSOLE.print(f"Using training SceneBox for mesh extraction: {_bbox_str}")
 
         tsdf_utils.export_tsdf_mesh(
             pipeline,
@@ -168,14 +191,25 @@ class ExportTSDFMesh(Exporter):
                 num_pixels_per_side=self.num_pixels_per_side,
             )
 
+    def _config_override_fn(self, config):
+        if self.foreground_only:
+            config.pipeline.model.render_background = False
+        config.pipeline.datamanager.eval_num_rays_per_batch = self.num_rays_per_chunk
+        config.pipeline.model.eval_num_rays_per_chunk = self.num_rays_per_chunk
+        config.pipeline.model.background_color = self.background_color
+        config.pipeline.model.mask_depth_with_acc = self.mask_depth_with_acc
+        config.pipeline.model.depth_renderer_mode = self.depth_renderer_mode
+        config.pipeline.datamanager.dataparser.object_bounds_extend_ratio = self.object_bounds_extend_ratio
+        return config
 
+    
 @dataclass
 class ExportPoissonMesh(Exporter):
     """
     Export a mesh using poisson surface reconstruction.
     """
 
-    num_points: int = 1000000
+    num_points: int = 1000000  # TODO: support only sample from the bbox mask
     """Number of points to generate. May result in less if outlier removal is used."""
     remove_outliers: bool = True
     """Remove outliers from the point cloud."""
@@ -195,6 +229,9 @@ class ExportPoissonMesh(Exporter):
     """Minimum of the bounding box, used if use_bounding_box is True."""
     bounding_box_max: Tuple[float, float, float] = (1, 1, 1)
     """Minimum of the bounding box, used if use_bounding_box is True."""
+    use_train_scene_box: bool = False
+    """use the tight scene box for training"""
+    object_bounds_extend_ratio: float = -0.05  # to avoid artifact near to fg bbox
     num_rays_per_batch: int = 32768
     """Number of rays to evaluate per batch. Decrease if you run out of memory."""
     texture_method: Literal["point_cloud", "nerf"] = "nerf"
@@ -209,6 +246,8 @@ class ExportPoissonMesh(Exporter):
     """Target number of faces for the mesh to texture."""
     std_ratio: float = 10.0
     """Threshold based on STD of the average distances across the point cloud to remove outliers."""
+    foreground_only: bool = True
+    """only render depth & rgb of the foreground field"""
 
     def validate_pipeline(self, pipeline: Pipeline) -> None:
         """Check that the pipeline is valid for this exporter."""
@@ -241,8 +280,19 @@ class ExportPoissonMesh(Exporter):
         if not self.output_dir.exists():
             self.output_dir.mkdir(parents=True)
 
-        _, pipeline, _ = eval_setup(self.load_config)
+        _, pipeline, _ = eval_setup(self.load_config,
+                                    config_override_fn=self._config_override_fn)
         self.validate_pipeline(pipeline)
+        
+        if self.use_train_scene_box:
+            self.use_bounding_box = True
+            aabb = pipeline.datamanager.train_dataset.scene_box.aabb
+            self.bounding_box_min = aabb[0].cpu().numpy()
+            self.bounding_box_max = aabb[1].cpu().numpy()
+            _bbox_str = str(
+                np.stack([self.bounding_box_min, self.bounding_box_max], 0).round(2)
+            )
+            CONSOLE.print(f"Using training SceneBox for mesh extraction: {_bbox_str}")
 
         # Increase the batchsize to speed up the evaluation.
         pipeline.datamanager.train_pixel_sampler.num_rays_per_batch = self.num_rays_per_batch
@@ -301,6 +351,11 @@ class ExportPoissonMesh(Exporter):
                 num_pixels_per_side=self.num_pixels_per_side,
             )
 
+    def _config_override_fn(self, config):
+        if self.foreground_only:
+            config.pipeline.model.render_background = False
+        config.pipeline.datamanager.dataparser.object_bounds_extend_ratio = self.object_bounds_extend_ratio
+        return config
 
 @dataclass
 class ExportMarchingCubesMesh(Exporter):

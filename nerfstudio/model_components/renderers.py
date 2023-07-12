@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """
 Collection of renderers
 
@@ -27,7 +26,8 @@ Example:
 
 """
 import math
-from typing import Optional, Union
+from typing import Optional, Union, Type
+from dataclasses import dataclass, field
 
 import nerfacc
 import torch
@@ -35,8 +35,12 @@ from torch import nn
 from torchtyping import TensorType
 from typing_extensions import Literal
 
+from torch.nn import functional as F
+
+from nerfstudio.configs.base_config import InstantiateConfig
 from nerfstudio.cameras.rays import RaySamples
 from nerfstudio.utils.math import components_from_spherical_harmonics
+from nerfstudio.utils.pointclouds import BasicPointClouds
 
 
 class RGBRenderer(nn.Module):
@@ -45,8 +49,10 @@ class RGBRenderer(nn.Module):
     Args:
         background_color: Background color as RGB. Uses random colors if None.
     """
-
-    def __init__(self, background_color: Union[Literal["random", "last_sample"], TensorType[3]] = "random") -> None:
+    def __init__(
+        self,
+        background_color: Union[Literal["random", "last_sample"], TensorType[3]] = "random"
+    ) -> None:
         super().__init__()
         self.background_color = background_color
 
@@ -74,7 +80,9 @@ class RGBRenderer(nn.Module):
         if ray_indices is not None and num_rays is not None:
             # Necessary for packed samples from volumetric ray sampler
             if background_color == "last_sample":
-                raise NotImplementedError("Background color 'last_sample' not implemented for packed samples.")
+                raise NotImplementedError(
+                    "Background color 'last_sample' not implemented for packed samples."
+                )
             comp_rgb = nerfacc.accumulate_along_rays(weights, ray_indices, rgb, num_rays)
             accumulated_weight = nerfacc.accumulate_along_rays(weights, ray_indices, None, num_rays)
         else:
@@ -111,7 +119,11 @@ class RGBRenderer(nn.Module):
         """
 
         rgb = self.combine_rgb(
-            rgb, weights, background_color=self.background_color, ray_indices=ray_indices, num_rays=num_rays
+            rgb,
+            weights,
+            background_color=self.background_color,
+            ray_indices=ray_indices,
+            num_rays=num_rays
         )
         if not self.training:
             torch.clamp_(rgb, min=0.0, max=1.0)
@@ -125,7 +137,6 @@ class SHRenderer(nn.Module):
         background_color: Background color as RGB. Uses random colors if None
         activation: Output activation.
     """
-
     def __init__(
         self,
         background_color: Union[Literal["random", "last_sample"], TensorType[3]] = "random",
@@ -170,7 +181,6 @@ class SHRenderer(nn.Module):
 
 class AccumulationRenderer(nn.Module):
     """Accumulated value along a ray."""
-
     @classmethod
     def forward(
         cls,
@@ -207,7 +217,6 @@ class DepthRenderer(nn.Module):
     Args:
         method: Depth calculation method.
     """
-
     def __init__(self, method: Literal["median", "expected"] = "median") -> None:
         super().__init__()
         self.method = method
@@ -235,7 +244,9 @@ class DepthRenderer(nn.Module):
             steps = (ray_samples.frustums.starts + ray_samples.frustums.ends) / 2
 
             if ray_indices is not None and num_rays is not None:
-                raise NotImplementedError("Median depth calculation is not implemented for packed samples.")
+                raise NotImplementedError(
+                    "Median depth calculation is not implemented for packed samples."
+                )
             cumulative_weights = torch.cumsum(weights[..., 0], dim=-1)  # [..., num_samples]
             split = torch.ones((*weights.shape[:-2], 1), device=weights.device) * 0.5  # [..., 1]
             median_index = torch.searchsorted(cumulative_weights, split, side="left")  # [..., 1]
@@ -263,10 +274,10 @@ class DepthRenderer(nn.Module):
 
 class UncertaintyRenderer(nn.Module):
     """Calculate uncertainty along the ray."""
-
     @classmethod
     def forward(
-        cls, betas: TensorType["bs":..., "num_samples", 1], weights: TensorType["bs":..., "num_samples", 1]
+        cls, betas: TensorType["bs":..., "num_samples", 1], weights: TensorType["bs":...,
+                                                                                "num_samples", 1]
     ) -> TensorType["bs":..., 1]:
         """Calculate uncertainty along the ray.
 
@@ -283,7 +294,6 @@ class UncertaintyRenderer(nn.Module):
 
 class SemanticRenderer(nn.Module):
     """Calculate semantics along the ray."""
-
     @classmethod
     def forward(
         cls,
@@ -297,7 +307,6 @@ class SemanticRenderer(nn.Module):
 
 class NormalsRenderer(nn.Module):
     """Calculate normals along the ray."""
-
     @classmethod
     def forward(
         cls,
@@ -307,3 +316,16 @@ class NormalsRenderer(nn.Module):
         """Calculate normals along the ray."""
         n = torch.sum(weights * normals, dim=-2)
         return n
+
+
+class FeatureRenderer(nn.Module):
+    """Calculate feature along the ray."""
+    @classmethod
+    def forward(
+        cls,
+        features: TensorType["bs":..., "num_samples", "nc_features"],
+        weights: TensorType["bs":..., "num_samples", 1],
+    ) -> TensorType["bs":..., "nc_features"]:
+        """Calculate features along the ray."""
+        feat = torch.sum(weights * features, dim=-2)
+        return feat

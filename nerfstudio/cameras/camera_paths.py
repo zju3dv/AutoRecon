@@ -147,3 +147,17 @@ def get_path_from_json(camera_path: Dict[str, Any]) -> Cameras:
         cy=image_height / 2,
         camera_to_worlds=camera_to_worlds,
     )
+
+
+def get_path_from_npz(camera_path: Dict[str, Any]) -> Cameras:
+    image_height, image_width = int(camera_path["height"]), int(camera_path["width"])
+    
+    K33_shared = torch.tensor(camera_path['K33'], dtype=torch.float32)
+    T44_c2w_all = torch.tensor(camera_path['T44_c2w'], dtype=torch.float32)  # (n, 4, 4)
+    K33 = K33_shared[None].repeat(T44_c2w_all.shape[0], 1, 1)
+    
+    return Cameras(
+        T44_c2w_all[:, :3],
+        fx=K33[:, 0, 0], fy=K33[:, 1, 1], cx=K33[:, 0, 2], cy=K33[:, 1, 2],
+        width=image_width, height=image_height,
+    )

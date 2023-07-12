@@ -131,7 +131,6 @@ class Trainer:
     def train(self) -> None:
         """Train the model."""
         assert self.pipeline.datamanager.train_dataset is not None, "Missing DatsetInputs"
-
         self._init_viewer_state()
         with TimeWriter(writer, EventName.TOTAL_TRAIN_TIME):
             num_iterations = self.config.trainer.max_num_iterations
@@ -259,17 +258,26 @@ class Trainer:
             if load_step is None:
                 print("Loading latest checkpoint from load_dir")
                 # NOTE: this is specific to the checkpoint name format
-                load_step = sorted(int(x[x.find("-") + 1 : x.find(".")]) for x in os.listdir(load_dir))[-1]
+                load_step = sorted(int(x[x.find("-") + 1: x.find(".")]) for x in os.listdir(load_dir))[-1]
             load_path = load_dir / f"step-{load_step:09d}.ckpt"
             assert load_path.exists(), f"Checkpoint {load_path} does not exist"
             loaded_state = torch.load(load_path, map_location="cpu")
-            self._start_step = loaded_state["step"] + 1
-            # load the checkpoints for pipeline, optimizers, and gradient scalar
-            self.pipeline.load_pipeline(loaded_state["pipeline"])
-            self.optimizers.load_optimizers(loaded_state["optimizers"])
-            if "schedulers" in loaded_state and self.config.trainer.load_scheduler:
-                self.optimizers.load_schedulers(loaded_state["schedulers"])
-            self.grad_scaler.load_state_dict(loaded_state["scalers"])
+            
+            # load pipeline ckpt
+            self.pipeline.load_pipeline(loaded_state["pipeline"], strict=self.config.trainer.load_pipeline_ckpt_strict)
+            if not self.config.trainer.load_pipeline_ckpt_strict:
+                CONSOLE.print("[yellow] Pipeline checkpoint loaded with strict=False")
+            
+            # load ckpt for step, optimizer, scheduler, grad_scaler
+            if not self.config.trainer.load_pipeline_ckpt_only:
+                self._start_step = loaded_state["step"] + 1
+                self.optimizers.load_optimizers(loaded_state["optimizers"])
+                if "schedulers" in loaded_state and self.config.trainer.load_scheduler:
+                    self.optimizers.load_schedulers(loaded_state["schedulers"])
+                self.grad_scaler.load_state_dict(loaded_state["scalers"])
+            else:
+                CONSOLE.print("[yellow] Only loading pipeline checkpoint, skipping optimizer and gradient scalar")
+            
             CONSOLE.print(f"done loading checkpoint from {load_path}")
         else:
             CONSOLE.print("No checkpoints to load, training from scratch")
@@ -325,7 +333,7 @@ class Trainer:
         # Merging loss and metrics dict into a single output.
         return loss, loss_dict, metrics_dict
 
-    @check_eval_enabled
+    @check_eval_enabled  # only run this routine when using wandb / tensorboard
     @profiler.time_function
     def eval_iteration(self, step):
         """Run one iteration with different batch/image/all image evaluations depending on step size.

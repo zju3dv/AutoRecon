@@ -18,6 +18,7 @@ Proposal network field.
 
 
 from typing import Optional
+from typing_extensions import Literal
 
 import numpy as np
 import torch
@@ -46,6 +47,8 @@ class HashMLPDensityField(Field):
         hidden_dim: dimension of hidden layers
         spatial_distortion: spatial distortion module
         use_linear: whether to skip the MLP and use a single linear layer instead
+        spatial_normalization_region: if 'full', normalize coorinates from [-2, 2] to [0, 1];
+            if 'fg', normalize coordinates from [-1, 1] to [0, 1]
     """
 
     def __init__(
@@ -60,11 +63,13 @@ class HashMLPDensityField(Field):
         base_res=16,
         log2_hashmap_size=18,
         features_per_level=2,
+        spatial_normalization_region: Literal['full', 'fg'] = 'full'
     ) -> None:
         super().__init__()
         self.aabb = Parameter(aabb, requires_grad=False)
         self.spatial_distortion = spatial_distortion
         self.use_linear = use_linear
+        self.spatial_normalization_region = spatial_normalization_region
         growth_factor = np.exp((np.log(max_res) - np.log(base_res)) / (num_levels - 1))
 
         config = {
@@ -96,10 +101,18 @@ class HashMLPDensityField(Field):
             self.encoding = tcnn.Encoding(n_input_dims=3, encoding_config=config["encoding"])
             self.linear = torch.nn.Linear(self.encoding.n_output_dims, 1)
 
+    def _get_normalized_positions(self, positions):
+        if self.spatial_normalization_region == 'full':
+            return (positions + 2.0) / 4.0
+        elif self.spatial_normalization_region == 'fg':
+            return (positions + 1.0) / 2.0
+        else:
+            raise ValueError(f"Unknown spatial normalization region: {self.spatial_normalization_region}")
+        
     def get_density(self, ray_samples: RaySamples):
         if self.spatial_distortion is not None:
             positions = self.spatial_distortion(ray_samples.frustums.get_positions())
-            positions = (positions + 2.0) / 4.0
+            positions = self._get_normalized_positions(positions)
         else:
             positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
         positions_flat = positions.view(-1, 3)
@@ -115,6 +128,7 @@ class HashMLPDensityField(Field):
         # softplus, because it enables high post-activation (float32) density outputs
         # from smaller internal (float16) parameters.
         density = trunc_exp(density_before_activation)
+        
         return density, None
 
     def get_outputs(self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None):

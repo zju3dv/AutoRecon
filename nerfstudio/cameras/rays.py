@@ -16,15 +16,24 @@
 Some ray datastructures.
 """
 import random
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torchtyping import TensorType
+from rich.console import Console
 
 from nerfstudio.utils.math import Gaussians, conical_frustum_to_gaussian
 from nerfstudio.utils.tensor_dataclass import TensorDataclass
 
+CONSOLE = Console(width=120)
+
+NEGATIVE_MIN_DELTA_WARNING = ("[bold yellow]RaySamples.deltas includes negative values, "
+                              "which might be caused by nears > fars / bad weights (e.g., all zeros) "
+                              "/ numerical issues caused by nears being too closed with fars. "
+                              "This will lead to negative weights and NaN interlevel loss.")
+_WARNED = False
 
 @dataclass
 class Frustums(TensorDataclass):
@@ -128,6 +137,19 @@ class RaySamples(TensorDataclass):
     times: Optional[TensorType[..., 1]] = None
     """Times at which rays are sampled"""
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.deltas is not None:
+            negative_deltas_mask = self.deltas < 0
+            if negative_deltas_mask.any():
+                n_negative_deltas = negative_deltas_mask.sum()
+                self.deltas[negative_deltas_mask] = 0.
+                global _WARNED  # TODO: use a context manager to count the number of time this warning is triggered
+                if not _WARNED:
+                    _WARNED = True
+                    CONSOLE.print(NEGATIVE_MIN_DELTA_WARNING)
+                    CONSOLE.print(f"[bold yellow]Truncate negative deltas to 0! ({n_negative_deltas} in total)")
+    
     def get_weights(self, densities: TensorType[..., "num_samples", 1]) -> TensorType[..., "num_samples", 1]:
         """Return weights based on predicted densities
 
@@ -137,7 +159,6 @@ class RaySamples(TensorDataclass):
         Returns:
             Weights for each sample
         """
-
         delta_density = self.deltas * densities
         alphas = 1 - torch.exp(-delta_density)
 
@@ -148,6 +169,10 @@ class RaySamples(TensorDataclass):
         transmittance = torch.exp(-transmittance)  # [..., "num_samples"]
 
         weights = alphas * transmittance  # [..., "num_samples"]
+        weights = torch.nan_to_num(weights)  # nan weights might be caused by inf densities
+        
+        if torch.isnan(weights).any():
+            __import__('ipdb').set_trace()
 
         return weights
 
@@ -173,6 +198,7 @@ class RaySamples(TensorDataclass):
         transmittance = torch.exp(-transmittance)  # [..., "num_samples"]
 
         weights = alphas * transmittance  # [..., "num_samples"]
+        weights = torch.nan_to_num(weights)  # nan weights might be caused by inf densities
 
         return weights, transmittance
 
@@ -191,6 +217,7 @@ class RaySamples(TensorDataclass):
         )  # [..., "num_samples"]
 
         weights = alphas * transmittance[:, :-1, :]  # [..., "num_samples"]
+        weights = torch.nan_to_num(weights)
 
         return weights
 
@@ -211,6 +238,10 @@ class RaySamples(TensorDataclass):
         )  # [..., "num_samples"]
 
         weights = alphas * transmittance[:, :-1, :]  # [..., "num_samples"]
+        weights = torch.nan_to_num(weights)
+        
+        if torch.isnan(weights).any():
+            __import__('ipdb').set_trace()
 
         return weights, transmittance
 
@@ -234,7 +265,8 @@ class RayBundle(TensorDataclass):
     """Distance along ray to start sampling"""
     fars: Optional[TensorType[..., 1]] = None
     """Rays Distance along ray to stop sampling"""
-    metadata: Optional[Dict[str, TensorType["num_rays", "latent_dims"]]] = None
+    # metadata: Optional[Dict[str, TensorType["num_rays", "latent_dims"]]] = None
+    metadata: Optional[Dict[str, TensorType["bs":..., "latent_dims"]]] = None
     """Additional metadata or data needed for interpolation, will mimic shape of rays"""
     times: Optional[TensorType[..., 1]] = None
     """Times at which rays are sampled"""
@@ -295,6 +327,11 @@ class RayBundle(TensorDataclass):
             Samples projected along ray.
         """
         deltas = bin_ends - bin_starts
+        # if deltas.min() < 0:
+        #     CONSOLE.log(NEGATIVE_MIN_DELTA_WARNING)
+        #     # if nears and fars are too close to each other (e.g., the ray is intersecting the edge region of an aabb),
+        #     # the spacing between ray samples might not be handled properly using float32.
+        #     __import__('ipdb').set_trace()
         if self.camera_indices is not None:
             camera_indices = self.camera_indices[..., None]
         else:

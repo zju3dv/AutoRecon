@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """
 Code for sampling images from a dataset of images.
 """
@@ -33,6 +32,7 @@ from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.data.utils.nerfstudio_collate import nerfstudio_collate
 from nerfstudio.utils.misc import get_dict_to_torch
+from nerfstudio.utils.mask_utils import compute_mask_indices
 
 CONSOLE = Console(width=120)
 
@@ -48,7 +48,6 @@ class CacheDataloader(DataLoader):
         device: Device to perform computation.
         collate_fn: The function we will use to collate our training data
     """
-
     def __init__(
         self,
         dataset: Dataset,
@@ -61,8 +60,11 @@ class CacheDataloader(DataLoader):
         self.dataset = dataset
         super().__init__(dataset=dataset, **kwargs)  # This will set self.dataset
         self.num_times_to_repeat_images = num_times_to_repeat_images
-        self.cache_all_images = (num_images_to_sample_from == -1) or (num_images_to_sample_from >= len(self.dataset))
-        self.num_images_to_sample_from = len(self.dataset) if self.cache_all_images else num_images_to_sample_from
+        self.cache_all_images = (num_images_to_sample_from
+                                 == -1) or (num_images_to_sample_from >= len(self.dataset))
+        self.num_images_to_sample_from = len(
+            self.dataset
+        ) if self.cache_all_images else num_images_to_sample_from
         self.device = device
         self.collate_fn = collate_fn
         self.num_workers = kwargs.get("num_workers", 0)
@@ -108,7 +110,10 @@ class CacheDataloader(DataLoader):
                 results.append(res)
 
             for res in track(
-                results, description="Loading data batch", transient=True, disable=(self.num_images_to_sample_from == 1)
+                results,
+                description="Loading data batch",
+                transient=True,
+                disable=(self.num_images_to_sample_from == 1)
             ):
                 batch_list.append(res.result())
 
@@ -119,6 +124,7 @@ class CacheDataloader(DataLoader):
         batch_list = self._get_batch_list()
         collated_batch = self.collate_fn(batch_list)
         collated_batch = get_dict_to_torch(collated_batch, device=self.device, exclude=["image"])
+        collated_batch = compute_mask_indices(collated_batch)
         return collated_batch
 
     def __iter__(self):
@@ -126,7 +132,8 @@ class CacheDataloader(DataLoader):
             if self.cache_all_images:
                 collated_batch = self.cached_collated_batch
             elif self.first_time or (
-                self.num_times_to_repeat_images != -1 and self.num_repeated >= self.num_times_to_repeat_images
+                self.num_times_to_repeat_images != -1 and
+                self.num_repeated >= self.num_times_to_repeat_images
             ):
                 # trigger a reset
                 self.num_repeated = 0
@@ -147,7 +154,6 @@ class EvalDataloader(DataLoader):
         input_dataset: InputDataset to load data from
         device: Device to load data to
     """
-
     def __init__(
         self,
         input_dataset: InputDataset,
@@ -197,7 +203,6 @@ class FixedIndicesEvalDataloader(EvalDataloader):
         image_indices: List of image indices to load data from. If None, then use all images.
         device: Device to load data to
     """
-
     def __init__(
         self,
         input_dataset: InputDataset,
@@ -232,14 +237,17 @@ class RandIndicesEvalDataloader(EvalDataloader):
         input_dataset: InputDataset to load data from
         device: Device to load data to
     """
-
     def __init__(
         self,
         input_dataset: InputDataset,
+        image_indices: Optional[Tuple[int]] = None,
         device: Union[torch.device, str] = "cpu",
         **kwargs,
     ):
         super().__init__(input_dataset, device, **kwargs)
+        self.image_indices = image_indices
+        # if self.image_indices is None:
+        #     self.image_indices = range(self.cameras.size)
         self.count = 0
 
     def __iter__(self):
@@ -248,7 +256,7 @@ class RandIndicesEvalDataloader(EvalDataloader):
 
     def __next__(self):
         if self.count < 1:
-            image_indices = range(self.cameras.size)
+            image_indices = range(self.cameras.size) if self.image_indices is None else self.image_indices
             image_idx = random.choice(image_indices)
             ray_bundle, batch = self.get_data_from_image_idx(image_idx)
             self.count += 1

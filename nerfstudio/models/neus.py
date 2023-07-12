@@ -28,6 +28,7 @@ from nerfstudio.engine.callbacks import (
     TrainingCallbackLocation,
 )
 from nerfstudio.field_components.field_heads import FieldHeadNames
+from nerfstudio.fields.sdf_field import SDFField
 from nerfstudio.model_components.ray_samplers import NeuSSampler
 from nerfstudio.models.base_surface_model import SurfaceModel, SurfaceModelConfig
 
@@ -47,6 +48,8 @@ class NeuSModelConfig(SurfaceModelConfig):
     """fixed base variance in NeuS sampler, the inv_s will be base * 2 ** iter during upsample"""
     perturb: bool = True
     """use to use perturb for the sampled points"""
+    cos_anneal_end: int = 50000
+    """iterations to apply cosine annealing when computing alpha values (avoid vanishing gradient and get a coarse surface in the beginning.) """
 
 
 class NeuSModel(SurfaceModel):
@@ -70,12 +73,13 @@ class NeuSModel(SurfaceModel):
             base_variance=self.config.base_variance,
         )
 
-        self.anneal_end = 50000
+        self.anneal_end = self.config.cos_anneal_end  # 50000
 
     def get_training_callbacks(
         self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
-        callbacks = []
+        callbacks = super().get_training_callbacks(training_callback_attributes)
+        
         # anneal for cos in NeuS
         if self.anneal_end > 0:
 
@@ -100,7 +104,7 @@ class NeuSModel(SurfaceModel):
         weights, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(
             field_outputs[FieldHeadNames.ALPHA]
         )
-        bg_transmittance = transmittance[:, -1, :]
+        bg_transmittance = transmittance[:, -1, :]  # the last fg transmittance -> the first bg transmittance
 
         samples_and_field_outputs = {
             "ray_samples": ray_samples,
@@ -112,7 +116,7 @@ class NeuSModel(SurfaceModel):
 
     def get_metrics_dict(self, outputs, batch) -> Dict:
         metrics_dict = super().get_metrics_dict(outputs, batch)
-        if self.training:
+        if self.training and isinstance(self.field, SDFField):
             # training statics
             metrics_dict["s_val"] = self.field.deviation_network.get_variance().item()
             metrics_dict["inv_s"] = 1.0 / self.field.deviation_network.get_variance().item()

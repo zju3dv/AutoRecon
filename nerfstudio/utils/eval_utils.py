@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable
 
 import torch
 import yaml
@@ -59,7 +59,11 @@ def eval_load_checkpoint(config: cfg.TrainerConfig, pipeline: Pipeline) -> Path:
     load_path = config.load_dir / f"step-{load_step:09d}.ckpt"
     assert load_path.exists(), f"Checkpoint {load_path} does not exist"
     loaded_state = torch.load(load_path, map_location="cpu")
-    pipeline.load_pipeline(loaded_state["pipeline"])
+    if getattr(config, "load_pipeline_ckpt_strict", True):
+        pipeline.load_pipeline(loaded_state["pipeline"])
+    else:
+        pipeline.load_pipeline(loaded_state["pipeline"], strict=False)
+        CONSOLE.print("[bold yellow]Pipeline checkpoint loaded with strict=False")
     CONSOLE.print(f":white_check_mark: Done loading checkpoint from {load_path}")
     return load_path
 
@@ -68,6 +72,8 @@ def eval_setup(
     config_path: Path,
     eval_num_rays_per_chunk: Optional[int] = None,
     test_mode: Literal["test", "val", "inference"] = "test",
+    cache_images: bool = True,
+    config_override_fn: Optional[Callable] = None
 ) -> Tuple[cfg.Config, Pipeline, Path]:
     """Shared setup for loading a saved pipeline for evaluation.
 
@@ -94,6 +100,13 @@ def eval_setup(
     # TODO: expose the ability to choose an arbitrary checkpoint
     config.trainer.load_dir = config.get_checkpoint_dir()
     config.pipeline.datamanager.eval_image_indices = None
+    if not cache_images:
+        config.pipeline.datamanager.train_num_images_to_sample_from = 0
+        config.pipeline.datamanager.eval_num_images_to_sample_from = 0
+    
+    if config_override_fn is not None:
+        CONSOLE.print(f"Overriding config with {config_override_fn}")
+        config_override_fn(config)
 
     # setup pipeline (which includes the DataManager)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

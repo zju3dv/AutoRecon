@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """
 Custom collate function that includes cases for nerfstudio types.
 """
@@ -30,14 +29,13 @@ from nerfstudio.utils.images import BasicImages
 
 # pylint: disable=implicit-str-concat
 NERFSTUDIO_COLLATE_ERR_MSG_FORMAT = (
-    "default_collate: batch must contain tensors, numpy arrays, numbers, " "dicts, lists or anything in {}; found {}"
+    "default_collate: batch must contain tensors, numpy arrays, numbers, "
+    "dicts, lists or anything in {}; found {}"
 )
 np_str_obj_array_pattern = re.compile(r"[SaUO]")
 
 
-def nerfstudio_collate(
-    batch, extra_mappings: Union[Dict[type, Callable], None] = None
-):  # pylint: disable=too-many-return-statements
+def nerfstudio_collate(batch, extra_mappings: Union[Dict[type, Callable], None] = None):  # pylint: disable=too-many-return-statements
     r"""
     This is the default pytorch collate function, but with support for nerfstudio types. All documentation
     below is copied straight over from pytorch's default_collate function, python version 3.8.13,
@@ -113,7 +111,9 @@ def nerfstudio_collate(
             if np_str_obj_array_pattern.search(elem.dtype.str) is not None:
                 raise TypeError(NERFSTUDIO_COLLATE_ERR_MSG_FORMAT.format(elem.dtype))
 
-            return nerfstudio_collate([torch.as_tensor(b) for b in batch], extra_mappings=extra_mappings)
+            return nerfstudio_collate(
+                [torch.as_tensor(b) for b in batch], extra_mappings=extra_mappings
+            )
         elif elem.shape == ():  # scalars
             return torch.as_tensor(batch)
     elif isinstance(elem, float):
@@ -125,13 +125,22 @@ def nerfstudio_collate(
     elif isinstance(elem, collections.abc.Mapping):
         try:
             return elem_type(
-                {key: nerfstudio_collate([d[key] for d in batch], extra_mappings=extra_mappings) for key in elem}
+                {
+                    key: nerfstudio_collate([d[key] for d in batch], extra_mappings=extra_mappings)
+                    for key in elem
+                }
             )
         except TypeError:
             # The mapping type may not support `__init__(iterable)`.
-            return {key: nerfstudio_collate([d[key] for d in batch], extra_mappings=extra_mappings) for key in elem}
+            return {
+                key: nerfstudio_collate([d[key] for d in batch], extra_mappings=extra_mappings)
+                for key in elem
+            }
     elif isinstance(elem, tuple) and hasattr(elem, "_fields"):  # namedtuple
-        return elem_type(*(nerfstudio_collate(samples, extra_mappings=extra_mappings) for samples in zip(*batch)))
+        return elem_type(
+            *
+            (nerfstudio_collate(samples, extra_mappings=extra_mappings) for samples in zip(*batch))
+        )
     elif isinstance(elem, collections.abc.Sequence):
         # check to make sure that the elements in batch have consistent size
         it = iter(batch)
@@ -146,10 +155,18 @@ def nerfstudio_collate(
             ]  # Backwards compatibility.
         else:
             try:
-                return elem_type([nerfstudio_collate(samples, extra_mappings=extra_mappings) for samples in transposed])
+                return elem_type(
+                    [
+                        nerfstudio_collate(samples, extra_mappings=extra_mappings)
+                        for samples in transposed
+                    ]
+                )
             except TypeError:
                 # The sequence type may not support `__init__(iterable)` (e.g., `range`).
-                return [nerfstudio_collate(samples, extra_mappings=extra_mappings) for samples in transposed]
+                return [
+                    nerfstudio_collate(samples, extra_mappings=extra_mappings)
+                    for samples in transposed
+                ]
 
     # NerfStudio types supported below
 
@@ -178,16 +195,17 @@ def nerfstudio_collate(
             width=op([cameras.width for cameras in batch], dim=0),
             distortion_params=op(
                 [
-                    cameras.distortion_params
-                    if cameras.distortion_params is not None
-                    else torch.zeros_like(cameras.distortion_params)
-                    for cameras in batch
+                    cameras.distortion_params if cameras.distortion_params is not None else
+                    torch.zeros_like(cameras.distortion_params) for cameras in batch
                 ],
                 dim=0,
             ),
             camera_type=op([cameras.camera_type for cameras in batch], dim=0),
             times=torch.stack(
-                [cameras.times if cameras.times is not None else -torch.ones_like(cameras.times) for cameras in batch],
+                [
+                    cameras.times if cameras.times is not None else -torch.ones_like(cameras.times)
+                    for cameras in batch
+                ],
                 dim=0,
             ),
         )

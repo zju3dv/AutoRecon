@@ -19,14 +19,23 @@ Collection of sampling strategies
 import math
 from abc import abstractmethod
 from typing import Callable, List, Optional, Tuple, Union
-
-import nerfacc
-import torch
-from nerfacc import OccupancyGrid
-from torch import nn
 from torchtyping import TensorType
+from rich.console import Console
+from copy import deepcopy
+
+import torch
+import nerfacc
+from torch import nn
+from nerfacc import OccupancyGrid
 
 from nerfstudio.cameras.rays import Frustums, RayBundle, RaySamples
+
+CONSOLE = Console(width=120)
+
+NEGATIVE_MIN_DELTA_WARNING = """[bold yellow]RaySamples.deltas.min() < 0, which might be caused by
+                                nears > fars / bad weights (e.g., all zeros)
+                                / numerical issues caused by nears being too closed with fars.
+                                This will lead to negative weights and NaN interlevel loss."""
 
 
 class Sampler(nn.Module):
@@ -116,6 +125,12 @@ class SpacedSampler(Sampler):
         spacing_to_euclidean_fn = lambda x: self.spacing_fn_inv(x * s_far + (1 - x) * s_near)
         euclidean_bins = spacing_to_euclidean_fn(bins)  # [num_rays, num_samples+1]
 
+        # _deltas = euclidean_bins[..., 1:, None] - euclidean_bins[..., :-1, None]
+        # if _deltas.min() < 0:
+        #     CONSOLE.log(NEGATIVE_MIN_DELTA_WARNING)
+        #     # if nears and fars are too close to each other (e.g., the ray is intersecting the edge region of an aabb),
+        #     # the spacing between ray samples might not be handled properly using float32.
+        
         ray_samples = ray_bundle.get_ray_samples(
             bin_starts=euclidean_bins[..., :-1, None],
             bin_ends=euclidean_bins[..., 1:, None],
@@ -358,6 +373,15 @@ class PDFSampler(Sampler):
         bins = bins.detach()
 
         euclidean_bins = ray_samples.spacing_to_euclidean_fn(bins)
+        # NOTE: numerical issues: deltas directly computed from bins are always positive, but deltas computed from euclidean_bins can be negative
+        # spcaing_to_euclidean_fn = lambda x: x
+        # _deltas = euclidean_bins[..., 1:, None] - euclidean_bins[..., :-1, None]
+        # if _deltas.min() < 0:
+        #     if _deltas.min() < 0:
+        #         CONSOLE.log(NEGATIVE_MIN_DELTA_WARNING)
+        #         # if nears and fars are too close to each other (e.g., the ray is intersecting the edge region of an aabb),
+        #         # the spacing between ray samples might not be handled properly using float32.
+        #         __import__('ipdb').set_trace()
 
         ray_samples = ray_bundle.get_ray_samples(
             bin_starts=euclidean_bins[..., :-1, None],
@@ -780,6 +804,12 @@ class ErrorBoundedSampler(Sampler):
         bins = bins.detach()
 
         euclidean_bins = ray_samples_1.spacing_to_euclidean_fn(bins)
+        
+        # _deltas = euclidean_bins[..., 1:, None] - euclidean_bins[..., :-1, None]
+        # if _deltas.min() < 0:
+        #     CONSOLE.print("[bold yellow]Warning: RaySamples.deltas.min() < 0, which indicates nears > fars. This will lead to negative weights and NaN interlevel loss.")
+        #     # NOTE: "deltas.min() == 0" might be caused by the nears and fars being too close to each other, which cannot be handled using float32.
+        #     __import__('ipdb').set_trace()
 
         ray_samples = ray_bundle.get_ray_samples(
             bin_starts=euclidean_bins[..., :-1, None],
@@ -871,7 +901,7 @@ class NeuSSampler(Sampler):
 
             with torch.no_grad():
                 new_sdf = sdf_fn(new_samples)
-
+            
             # merge sdf predictions
             if sorted_index is not None:
                 sdf_merge = torch.cat([sdf.squeeze(-1), new_sdf.squeeze(-1)], -1)
@@ -1505,3 +1535,285 @@ class NeuSAccSampler(Sampler):
             # save_points("second.ply", ray_samples.frustums.get_start_positions().cpu().numpy().reshape(-1, 3))
 
         return ray_samples, ray_indices
+
+
+class RayTracingSampler(Sampler):
+    """Find sample points with ray tracing.
+    This sampler only finds the intersection points, assuming the SDFField is already trained,
+    thus is not suitable for training.
+    Handling of rays with non-convergent sphere-tracing results (e.g., in IDR) is ommitted.
+    
+    TODO: accelarate ray marching (lots of marching steps are too small)
+        - performing 64 st steps for each ray is too slow
+        - cuda implementation
+        - when the convergence criterion is met, additionally check if the volrend weights at the intersection point is above a threshold, if not, keep marching forward
+    NOTE:
+        - the sdf learned with VolRend might not be a valid sdf everywhere, especially near to the border of the fg bbox
+            - a ray might immediately converge near to the border of the fg bbox
+        - if the step_sizes are too consevative, some rays hitting surfaces (e.g., the ground plane) might not converge
+    """
+    def __init__(
+        self,
+        sdf_threshold: float = 1.0e-4,  # TODO: tune the termination threshold
+        mid_points_criteria: bool = True,
+        mid_points_multiplier: float = 5.0,  # multiply sdf_threshold with this scaler if using the center of two consecutive marching points as convergence criterion
+        first_step_size: float = 1.0,
+        conservative_step_size: float = 0.5,  # use < 1.0 for conservative marching, since the sdf_field learnt with VolRend might not be a valid sdf everywhere
+        line_search_step: float = 0.5,  # IDR: backward stepping of overly-marched steps
+        line_step_iters: int = 3,  # IDR: backward stepping of overly-marched steps
+        sphere_tracing_iters: int = 64,  # TODO: tune maximum number of st iters
+        conservative_iters: int = 32,  # perform ray marching with convervative step size at the starting iters
+        aabb: Optional[TensorType[2, 3]] = None,
+        start_aabb_ratio: Optional[float] = 0.0075  # TODO: tune start marching from the ray-aabb-intersection-point + aabb_side_len * start_aabb_ratio to avoid bad sdf values near to the aabb boundary
+    ) -> None:
+        super().__init__()
+        self.sdf_threshold = sdf_threshold
+        self.mid_points_criteria = mid_points_criteria
+        self.mid_pts_sdf_threshold = sdf_threshold * mid_points_multiplier
+        self.first_step_size = first_step_size
+        self.conservative_step_size = conservative_step_size
+        self.line_search_step = line_search_step
+        self.line_step_iters = line_step_iters
+        self.sphere_tracing_iters = sphere_tracing_iters
+        self.conservative_iters = conservative_iters
+        self.aabb = nn.Parameter(aabb, requires_grad=False) if aabb is not None else None
+        self.start_aabb_ratio = start_aabb_ratio
+        
+        if aabb is not None:
+            # assert (aabb[0].abs() == aabb[1].abs()).all(), "only support symmetric aabb for now"
+            extra_start_offset = (aabb[1] - aabb[0]) * start_aabb_ratio
+            new_aabb = torch.stack([aabb[0] + extra_start_offset, aabb[1] - extra_start_offset], dim=0)
+            self.extra_start_offset = nn.Parameter(extra_start_offset, requires_grad=False)
+            self.new_aabb = nn.Parameter(new_aabb, requires_grad=False)
+            self.axes = nn.Parameter(torch.eye(3, dtype=aabb.dtype), requires_grad=False)
+        
+    @torch.no_grad()
+    def generate_ray_samples(
+        self,
+        ray_bundle: RayBundle,
+        sdf_fn: Callable  # (..., 3) -> (..., 1)
+    ) -> Tuple[RaySamples, TensorType["bs": ..., 1, 1]]:
+        ray_bundle = self.adjust_aabb_intersection(ray_bundle)
+        
+        # sphere tracing from near to far
+        curr_pts, acc_dist, non_convergent_masks = self.sphere_tracing(ray_bundle, sdf_fn)  # (..., c)
+        # compute non-convergent masks (assign a arbitrary intersection point, use zeros for now)
+        # donnot update the original no_intersect_mask since volrend depends on it
+        
+        # build RaySamples with a single point per ray (should we sample around the intersection point?)
+        shaped_ray_bundle = ray_bundle[..., None]
+        frustums = Frustums(
+            origins=shaped_ray_bundle.origins,  # [..., 1, 3]
+            directions=shaped_ray_bundle.directions,  # [..., 1, 3]
+            starts=acc_dist[..., None, [0]],  # [..., 1, 1]
+            ends=acc_dist[..., None, [0]],  # [..., 1, 1]
+            pixel_area=shaped_ray_bundle.pixel_area,  # [..., 1, 1]
+        )
+        ray_samples = RaySamples(
+            frustums=frustums,
+            camera_indices=shaped_ray_bundle.camera_indices,
+            metadata=shaped_ray_bundle.metadata,
+        )
+        return ray_samples, non_convergent_masks[..., None]
+    
+    def adjust_aabb_intersection(self, ray_bundle: RayBundle) -> RayBundle:
+        """#adjust the 1st ray-aabb intersection to avoid bad sdf around boundary"""
+        if self.aabb is None:
+            return ray_bundle
+        
+        aabb = self.aabb  # (2, 3) assume symmetric
+        assert (aabb[0].abs() == aabb[1].abs()).all(), "only support symmetric aabb for now"
+        offset = self.extra_start_offset  # (3, )
+        ray_bundle = deepcopy(ray_bundle)
+        ray_o, ray_d = ray_bundle.origins, ray_bundle.directions
+        near, far = ray_bundle.nears, ray_bundle.fars
+        intersect_mask = ~ray_bundle.metadata["no_intersect_mask"][..., 0]
+        ray_o, ray_d, near, far = map(lambda x: x[intersect_mask], [ray_o, ray_d, near, far])
+        
+        # compute offset along ray
+        p = torch.addcmul(ray_o, ray_d, near)
+        
+        intersect_axis_idx = (p.abs() - aabb[1]).abs().argmin(dim=-1)  # (n, )
+        intersect_axis = self.axes[intersect_axis_idx]  # (n, 3)
+        _cos = ((ray_d * intersect_axis).sum(-1) / ray_d.norm(dim=-1)).abs()  # (n, )
+        ray_dist_offset = offset[intersect_axis_idx] / (_cos + 1e-8)  # (n, )
+        
+        # some rays may not intersect with the new aabb
+        new_p = torch.addcmul(ray_o, ray_d, near + ray_dist_offset[..., None])
+        # _new_non_intersect = (new_p.abs() - self.new_aabb[1] > 1e-4).any(-1)  # this causes some rays hitting the intersection of two plane to be mistakenly discarded
+        _new_non_intersect = (new_p.abs() - aabb[1] > 1e-4).any(-1)
+        non_intersect_mask = ~intersect_mask.clone()
+        non_intersect_mask[intersect_mask] = _new_non_intersect
+        
+        # update ray_bundle
+        ray_bundle.nears[intersect_mask] += ray_dist_offset[..., None]
+        ray_bundle.metadata["no_intersect_mask"] = non_intersect_mask[..., None]
+        return ray_bundle
+    
+    def sphere_tracing(self, ray_bundle: RayBundle, sdf_fn: Callable):
+        """Perform iterative sphere tracing.
+        ref: kaolin-wisp
+        
+        Returns:
+            intersection_points: (..., 3)
+            intersection_ray_dists: (..., 3)
+            non_convergent_masks: (..., 1)
+        """
+        prefix_dims = ray_bundle.origins.shape[:-1]
+        rays_o, rays_d = ray_bundle.origins.view(-1, 3), ray_bundle.directions.view(-1, 3)  # (n, 3)
+        nears, fars = ray_bundle.nears.view(-1, 1), ray_bundle.fars.view(-1, 1)  # (n, 1)
+        zeros = torch.zeros_like(nears)
+        _dtype = torch.float32  # sdf_fn might return float16
+        
+        # initialization
+        if ray_bundle.metadata is not None and "no_intersect_mask" in ray_bundle.metadata:
+            no_intersect_masks = ray_bundle.metadata["no_intersect_mask"].view(-1)
+        else:  # there might not be "no_intersect_mask" (e.g., during mesh extraction)
+            no_intersect_masks = torch.zeros_like(nears, dtype=torch.bool).view(-1)
+        mask = (~no_intersect_masks).clone()[..., None]  # (n, 1) non-convergent rays: only trace rays intersecting with the fg box
+        x = torch.addcmul(rays_o, rays_d, nears)  # (n, 3) current positions
+        hit = torch.zeros_like(nears, dtype=torch.bool)  # mask of rays hitting the surface
+        acc_dist = torch.where(mask, nears, fars)  # fars: maximum acc_dist
+        if not mask.any():  # e.g., all ray samples are from the background
+            return x, acc_dist, ~mask
+        
+        dist = zeros.clone()  # current marching distance
+        # the first step size should be especially conservative, since sdf near to the ray-aabb intersection might be invalid and causes a overshoot.
+        dist[mask[..., 0]] = sdf_fn(x[mask[..., 0]]).to(_dtype) * self.first_step_size
+        dist_prev = dist.clone()
+        # __import__('pudb').set_trace()  # 查看是否有初始点的sdf很接近0
+        # iterative ray marching
+        for i in range(self.sphere_tracing_iters):
+            step_size = self.conservative_step_size if i < self.conservative_iters else 1.0
+            
+            # update non-convergent masks
+            acc_dist += dist
+            x = torch.where(mask, torch.addcmul(rays_o, rays_d, acc_dist), x)  # (n, 3)
+            hit = torch.where(mask, dist.abs() <= self.sdf_threshold, hit)  # criteria-1
+            if self.mid_points_criteria:
+                hit |= torch.where(mask, ((dist + dist_prev) / 2).abs() <= self.mid_pts_sdf_threshold, hit)  # criteria-2
+            # TODO: for rays satisfying criteria-2, compute the accurate intersection pt w/ secant method or LinInterp
+            mask = torch.where(mask, acc_dist < fars, mask)  # criteria-3
+            mask &= ~hit
+            if not mask.any():
+                break
+            dist_prev = torch.where(mask, dist, dist_prev)
+            
+            # marching forward
+            dist[~mask] = 0  # TODO: handle criteria-2 rays
+            dist[mask[..., 0]] = sdf_fn(x[mask[..., 0]]).to(_dtype) * step_size
+        
+        # mask |= no_intersect_masks[..., None]
+        non_hit_mask = ~hit | no_intersect_masks[..., None]
+        
+        # reshape with prefix_dims
+        x = x.reshape(*prefix_dims, 3)
+        acc_dist = acc_dist.reshape(*prefix_dims, 1)
+        non_hit_mask = non_hit_mask.reshape(*prefix_dims, 1)
+        return x, acc_dist, non_hit_mask
+    
+    def _sphere_tracing_idr(self, ray_bundle: RayBundle, sdf_fn: Callable):
+        """
+        non_convergent_masks definition:
+            1. sphere-tracing is not convergent / intersection points falling beyond the far plane
+            2. 1 & forward tracing dist < backward tracing dist (IDR)
+        
+        Returns:
+            intersection_points: (..., 3)
+            intersection_ray_dists: (..., 3)
+            non_convergent_masks: (..., 1)
+        """
+        # TODO: share torch.zeros_like()
+        prefix_dims = ray_bundle.origins.shape[:-1]
+        origins, directions = ray_bundle.origins.view(-1, 3), ray_bundle.directions.view(-1, 3)  # (n, 3)
+        nears, fars = ray_bundle.nears.view(-1, 1), ray_bundle.fars.view(-1, 1)  # (n, )
+        
+        forward_pts = origins + directions * nears  # (n, 3)
+        if ray_bundle.metadata is not None and "no_intersect_mask" in ray_bundle.metadata:
+            no_intersect_masks = ray_bundle.metadata["no_intersect_mask"].view(-1)
+        else:  # there might not be "no_intersect_mask" (e.g., during mesh extraction)
+            no_intersect_masks = torch.zeros_like(nears, dtype=torch.bool).view(-1)
+        non_convergent_masks = (~no_intersect_masks).clone()  # (..., ) only trace rays intersecting with the fg box
+        # initialize start positions with the 1st ray-aabb intersection
+        curr_forward_pts = torch.where(non_convergent_masks[..., None],
+                                       forward_pts, torch.zeros_like(forward_pts))  # (n, 3)
+        acc_forward_dist = torch.where(non_convergent_masks[..., None],
+                                       nears, torch.zeros_like(nears))  # (n, 1)
+        if not non_convergent_masks.any():
+            return curr_forward_pts, acc_forward_dist, non_convergent_masks
+        
+        # iterative sphere tracing
+        i_sphere_tracing = 0
+        next_sdf_forward = torch.zeros_like(acc_forward_dist)
+        _sdf_dtype = next_sdf_forward.dtype
+        next_sdf_forward[non_convergent_masks] = sdf_fn(curr_forward_pts[non_convergent_masks]).to(_sdf_dtype)
+        curr_sdf_forward = next_sdf_forward.clone()
+        while True:
+            # TODO: when using the mid-pt as criteria, compute the intersection pt w/ LinInterp / Secant method
+            curr_sdf_forward = torch.where(non_convergent_masks[..., None],
+                                           next_sdf_forward, torch.zeros_like(next_sdf_forward))
+            
+            # update masks
+            # non_convergent_masks = non_convergent_masks & (curr_sdf_forward > self.sdf_threshold)[..., 0]
+            non_convergent_masks = non_convergent_masks & (curr_sdf_forward.abs() > self.sdf_threshold)[..., 0]
+            
+            # early stop
+            if non_convergent_masks.sum() == 0 or i_sphere_tracing == self.sphere_tracing_iters:
+                break
+            i_sphere_tracing += 1
+            
+            # perform ray marching
+            acc_forward_dist = acc_forward_dist + curr_sdf_forward  # FIXME: the last curr_sdf_forward is not correct (manually set to zero)
+            curr_forward_pts = origins + directions * acc_forward_dist
+            
+            # correct overshooting marching steps (pts falling inside the surface)
+            next_sdf_forward = torch.zeros_like(acc_forward_dist)
+            next_sdf_forward[non_convergent_masks] = sdf_fn(curr_forward_pts[non_convergent_masks]).to(_sdf_dtype)
+            uncorrected_forward = (next_sdf_forward < 0)[..., 0]
+            i_correction = 0
+            # step backwards with increasing step size until the sdf is positive
+            while uncorrected_forward.sum() > 0 and i_correction < self.line_step_iters:
+                # step backward
+                backward_step = ((1 - self.line_search_step) / (2**i_correction)) * curr_sdf_forward[uncorrected_forward]
+                acc_forward_dist[uncorrected_forward] -= backward_step
+                curr_forward_pts[uncorrected_forward] = (origins + directions * acc_forward_dist)[uncorrected_forward]
+                # compute new sdf
+                next_sdf_forward[uncorrected_forward] = sdf_fn(curr_forward_pts[uncorrected_forward]).to(_sdf_dtype)
+                # update mask
+                uncorrected_forward = (next_sdf_forward < 0)[..., 0]
+                i_correction += 1
+            
+        # non_convergent_masks = non_convergent_masks & (acc_forward_dist < acc_backward_dist)[..., 0]  # (n, 1)
+        non_convergent_masks = non_convergent_masks | no_intersect_masks
+        non_convergent_masks[(acc_forward_dist > fars)[..., 0]] = True
+        
+        # reshape with prefix_dims
+        curr_forward_pts = curr_forward_pts.reshape(*prefix_dims, 3)
+        acc_forward_dist = acc_forward_dist.reshape(*prefix_dims, 1)
+        non_convergent_masks = non_convergent_masks.reshape(*prefix_dims, )
+        return curr_forward_pts, acc_forward_dist, non_convergent_masks
+
+
+class DummySampler(Sampler):
+    """A dummy sampler which just use the origins of ray_bundle as the ray samples """
+    def __init__(self):
+        super().__init__()
+        
+    def generate_ray_samples(self, ray_bundle: RayBundle) -> RaySamples:
+        shaped_ray_bundle = ray_bundle[..., None]
+        origins = shaped_ray_bundle.origins  # [..., 1, 3]
+        zeros = torch.zeros_like(origins)
+        
+        # set zero starts and zero origins -> frustums.get_start_positions() = origins
+        frustums = Frustums(
+            origins=origins,  # [..., 1, 3]
+            directions=zeros,  # [..., 1, 3]
+            starts=zeros[..., [0]],  # [..., 1, 1]
+            ends=zeros[..., [0]],
+            pixel_area=torch.ones_like(origins[..., [0]])
+        )
+        ray_samples = RaySamples(
+            frustums=frustums,
+            camera_indices=zeros[..., [0]],
+        )
+        return ray_samples

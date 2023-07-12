@@ -22,6 +22,8 @@ from abc import abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Type
+from tqdm import tqdm
+from rich.console import Console
 
 import torch
 from torch import nn
@@ -34,6 +36,7 @@ from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes
 from nerfstudio.model_components.scene_colliders import NearFarCollider
 
+CONSOLE = Console(width=120)
 
 # Model related configs
 @dataclass
@@ -153,7 +156,7 @@ class Model(nn.Module):
         return {}
 
     @abstractmethod
-    def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
+    def get_loss_dict(self, outputs, batch, metrics_dict=None, **kwargs) -> Dict[str, torch.Tensor]:
         """Computes and returns the losses dict.
 
         Args:
@@ -173,7 +176,8 @@ class Model(nn.Module):
         image_height, image_width = camera_ray_bundle.origins.shape[:2]
         num_rays = len(camera_ray_bundle)
         outputs_lists = defaultdict(list)
-        for i in range(0, num_rays, num_rays_per_chunk):
+        for i in tqdm(range(0, num_rays, num_rays_per_chunk), desc='Rendering ray chunks'):
+            # TODO: ignore some keys / only store specific keys
             start_idx = i
             end_idx = i + num_rays_per_chunk
             ray_bundle = camera_ray_bundle.get_row_major_sliced_ray_bundle(start_idx, end_idx)
@@ -185,7 +189,11 @@ class Model(nn.Module):
             if not torch.is_tensor(outputs_list[0]):
                 # TODO: handle lists of tensors as well
                 continue
-            outputs[output_name] = torch.cat(outputs_list).view(image_height, image_width, -1)  # type: ignore
+            try:
+                outputs[output_name] = torch.cat(outputs_list).view(image_height, image_width, -1)  # type: ignore
+            except RuntimeError as err:
+                CONSOLE.print(f"[bold red] Incompatible output shape: {output_name}: {torch.cat(outputs_list).shape}")
+                raise err
         return outputs
 
     @abstractmethod

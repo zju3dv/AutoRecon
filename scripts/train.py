@@ -51,11 +51,12 @@ from nerfstudio.configs.method_configs import AnnotatedBaseConfigUnion
 from nerfstudio.engine.trainer import Trainer
 from nerfstudio.utils import comms, profiler
 
-CONSOLE = Console(width=120)
+CONSOLE = Console(width=120, soft_wrap=True)
 DEFAULT_TIMEOUT = timedelta(minutes=30)
 
 # speedup for when input size to model doesn't change (much)
 torch.backends.cudnn.benchmark = True  # type: ignore
+# torch.autograd.set_detect_anomaly(True)
 
 
 def _find_free_port() -> str:
@@ -230,6 +231,7 @@ def main(config: cfg.Config) -> None:
     # print and save config
     config.print_to_terminal()
     config.save_config()
+    config.set_global()
 
     launch(
         main_func=train_loop,
