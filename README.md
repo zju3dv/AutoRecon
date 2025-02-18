@@ -9,7 +9,7 @@
 > CVPR 2023
 
 # About
-This is a refactor version of the [AutoRecon](https://zju3dv.github.io/autorecon) project based on the NeRFStudio and the SDFStudio codebase. We separate the project into two parts. The coarse decomposition part is implemented in the [AutoDecomp](https://github.com/zju3dv/AutoDecomp) repo, which can be used as a general tool for 3D object discovery and preprocessing casual captures for object reconstruction. The neural surface reconstruction part is implemented here.
+This is a refactored version of the [AutoRecon](https://zju3dv.github.io/autorecon) project based on the NeRFStudio and the SDFStudio codebase. We separate the project into two parts. The coarse decomposition part is implemented in the [AutoDecomp](https://github.com/zju3dv/AutoDecomp) repo, which can be used as a general tool for 3D object discovery and preprocessing casual captures for object reconstruction. The neural surface reconstruction part is implemented here.
 
 
 # Installation
@@ -22,16 +22,16 @@ Here we take a demo data as an example. In this example, we assume only a sequen
 1. Download the demo data from [Google Drive](https://drive.google.com/drive/folders/1IFbK9b7gzqwh9QkZe6zoLmcSFr_zW3rJ?usp=drive_link) and put it under `data` (-> `data/custom_data_example/...`)
 2. Run the pipeline with `exps/code-release/run_pipeline_demo_low-res.sh`
 
-> NOTE: In the demo script, we assume the images come from a sequential video stream and use sequential matching for SfM. If you have unordered images, the default setting might lead to inferior result and it is recommended to use exhaustive matching or vocab-tree instead.
+> NOTE: In the demo script, we assume the images come from a sequential video stream and use sequential matching for SfM. If you have unordered images, the default setting might lead to inferior results and it is recommended to use exhaustive matching or vocab-tree instead.
 
 
 ## Run the pipeline with annotated data in the IDR format
 1. Download the BlendedMVS data from [GoogleDrive](https://drive.google.com/drive/folders/1ZLQ0hap6o_Tjr7S6H_EAn17pz4_qFluW?usp=sharing) and put it under `data` (-> `data/BlendedMVS/...`)
-2. Run one of the script in `exps/code-release/bmvs`
+2. Run one of the scripts in `exps/code-release/bmvs`
 
 ## Run the pipeline with CO3D data
-1. Downloadt the CO3D data from [GoogleDrive](https://drive.google.com/drive/folders/1u-ugNhwFVtV6TKZ2J29iwcdQY2iwVnoi?usp=sharing) and put it under `data` (-> `data/CO3D_DEMO/...`)
-2. Run one of the script in `exps/code-release/co3d_demo`
+1. Download the CO3D data from [GoogleDrive](https://drive.google.com/drive/folders/1u-ugNhwFVtV6TKZ2J29iwcdQY2iwVnoi?usp=sharing) and put it under `data` (-> `data/CO3D_DEMO/...`)
+2. Run one of the scripts in `exps/code-release/co3d_demo`
 
 
 # Extract Mesh
